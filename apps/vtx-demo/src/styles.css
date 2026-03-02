@@ -86,7 +86,8 @@ header h1 {
 
 #status-bar {
   display: flex;
-  gap: 16px;
+  gap: 8px;
+  align-items: center;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -95,6 +96,39 @@ header h1 {
   padding: 2px 8px;
   border-radius: 4px;
   background: var(--surface-input);
+}
+
+.status-badge {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.badge-cuda {
+  background: rgba(118, 185, 0, 0.15);
+  color: #76b900;
+  border: 1px solid rgba(118, 185, 0, 0.35);
+}
+
+.badge-metal {
+  background: rgba(0, 163, 255, 0.15);
+  color: #00a3ff;
+  border: 1px solid rgba(0, 163, 255, 0.35);
+}
+
+.badge-cpu {
+  background: rgba(156, 163, 175, 0.15);
+  color: var(--text-secondary);
+  border: 1px solid rgba(156, 163, 175, 0.25);
+}
+
+.badge-model {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  font-weight: 500;
 }
 
 main {
@@ -187,6 +221,75 @@ button#btn-download-model {
 
 button#btn-download-model:hover:not(:disabled) {
   background: #d97706;
+}
+
+/* Transcription toggle switch */
+.transcription-toggle-group {
+  margin-left: auto;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.toggle-label input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  background: var(--surface-input);
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.toggle-label input:checked + .toggle-track {
+  background: rgba(57, 108, 216, 0.3);
+  border-color: var(--btn-primary-bg);
+}
+
+.toggle-label input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+  background: var(--btn-primary-bg);
+}
+
+.toggle-label:hover .toggle-track {
+  border-color: var(--border-hover);
+}
+
+.toggle-text {
+  color: var(--text-secondary);
+  transition: color 0.2s;
+}
+
+.toggle-label input:not(:checked) ~ .toggle-text {
+  color: var(--text-muted);
 }
 
 /* Visualizations */

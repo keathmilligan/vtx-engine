@@ -140,6 +140,31 @@ async fn get_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus, S
     Ok(engine.get_status())
 }
 
+#[tauri::command]
+async fn get_gpu_status(state: tauri::State<'_, AppState>) -> Result<vtx_common::GpuStatus, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.check_gpu_status()
+}
+
+#[tauri::command]
+async fn set_transcription_enabled(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.set_transcription_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn is_transcription_enabled(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    Ok(engine.is_transcription_enabled())
+}
+
 // =============================================================================
 // App Entry Point
 // =============================================================================
@@ -199,6 +224,9 @@ pub fn run() {
             download_model,
             transcribe_file,
             get_status,
+            get_gpu_status,
+            set_transcription_enabled,
+            is_transcription_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

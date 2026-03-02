@@ -75,6 +75,7 @@ export class WaveformRenderer {
 
   resize(): void {
     this.setupCanvas();
+    this.drawIdle();
   }
 
   drawIdle(): void {
@@ -336,6 +337,7 @@ export class SpectrogramRenderer {
 
   resize(): void {
     this.setupCanvas();
+    this.drawIdle();
   }
 
   drawIdle(): void {
@@ -664,6 +666,7 @@ export class SpeechActivityRenderer {
 
   resize(): void {
     this.setupCanvas();
+    this.drawIdle();
   }
 
   drawIdle(): void {
@@ -1024,6 +1027,7 @@ export class MiniWaveformRenderer {
 
   resize(): void {
     this.setupCanvas();
+    this.drawIdle();
   }
 
   drawIdle(): void {

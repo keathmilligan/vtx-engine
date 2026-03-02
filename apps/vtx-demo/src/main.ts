@@ -29,6 +29,12 @@ interface ModelStatus {
   path: string;
 }
 
+interface GpuStatus {
+  cuda_available: boolean;
+  metal_available: boolean;
+  system_info: string;
+}
+
 interface TranscriptionResult {
   text: string;
   duration_ms: number | null;
@@ -43,6 +49,7 @@ let isRecording = false;
 let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
+let transcriptionEnabled = true;
 
 // =============================================================================
 // DOM Elements
@@ -50,6 +57,8 @@ let speechActivityRenderer: SpeechActivityRenderer;
 
 const statusText = document.getElementById("status-text")!;
 const modelStatusEl = document.getElementById("model-status")!;
+const gpuStatusEl = document.getElementById("gpu-status")!;
+const modelNameEl = document.getElementById("model-name")!;
 const deviceSelect = document.getElementById(
   "device-select"
 ) as HTMLSelectElement;
@@ -61,6 +70,9 @@ const btnOpenFile = document.getElementById(
 const btnDownloadModel = document.getElementById(
   "btn-download-model"
 ) as HTMLButtonElement;
+const transcriptionToggle = document.getElementById(
+  "transcription-toggle"
+) as HTMLInputElement;
 const transcriptionOutput = document.getElementById("transcription-output")!;
 
 // =============================================================================
@@ -81,6 +93,7 @@ async function init() {
   setTimeout(async () => {
     await loadDevices();
     await checkModelStatus();
+    await checkGpuStatus();
     statusText.textContent = "Ready";
   }, 1000);
 }
@@ -118,6 +131,7 @@ function setupEventListeners() {
   btnStop.addEventListener("click", stopRecording);
   btnOpenFile.addEventListener("click", openWavFile);
   btnDownloadModel.addEventListener("click", downloadModel);
+  transcriptionToggle.addEventListener("change", onTranscriptionToggle);
 }
 
 async function setupBackendListeners() {
@@ -181,6 +195,8 @@ async function setupBackendListeners() {
     if (event.payload) {
       modelStatusEl.textContent = "Model ready";
       btnDownloadModel.style.display = "none";
+      // Refresh model name display after download
+      checkModelStatus();
     } else {
       modelStatusEl.textContent = "Download failed";
     }
@@ -316,9 +332,17 @@ async function checkModelStatus() {
     if (status.available) {
       modelStatusEl.textContent = "Model ready";
       btnDownloadModel.style.display = "none";
+      // Extract filename from path (strip directory and extension for display)
+      const parts = status.path.replace(/\\/g, "/").split("/");
+      const filename = parts[parts.length - 1] ?? status.path;
+      const modelName = filename.replace(/\.bin$/, "").replace(/^ggml-/, "");
+      modelNameEl.textContent = modelName;
+      modelNameEl.title = status.path;
+      modelNameEl.className = "status-badge badge-model";
     } else {
       modelStatusEl.textContent = "Model not found";
       btnDownloadModel.style.display = "inline-block";
+      modelNameEl.textContent = "";
     }
   } catch (e) {
     console.error("Failed to check model status:", e);
@@ -334,6 +358,42 @@ async function downloadModel() {
     console.error("Download failed:", e);
     modelStatusEl.textContent = `Download error: ${e}`;
     btnDownloadModel.disabled = false;
+  }
+}
+
+async function checkGpuStatus() {
+  try {
+    const status = await invoke<GpuStatus>("get_gpu_status");
+
+    if (status.cuda_available) {
+      gpuStatusEl.textContent = "CUDA";
+      gpuStatusEl.className = "status-badge badge-cuda";
+      gpuStatusEl.title = status.system_info;
+    } else if (status.metal_available) {
+      gpuStatusEl.textContent = "Metal";
+      gpuStatusEl.className = "status-badge badge-metal";
+      gpuStatusEl.title = status.system_info;
+    } else {
+      gpuStatusEl.textContent = "CPU";
+      gpuStatusEl.className = "status-badge badge-cpu";
+      gpuStatusEl.title = status.system_info;
+    }
+  } catch (e) {
+    console.error("Failed to check GPU status:", e);
+    gpuStatusEl.textContent = "GPU: unknown";
+    gpuStatusEl.className = "status-badge badge-cpu";
+  }
+}
+
+async function onTranscriptionToggle() {
+  transcriptionEnabled = transcriptionToggle.checked;
+  try {
+    await invoke("set_transcription_enabled", { enabled: transcriptionEnabled });
+  } catch (e) {
+    console.error("Failed to set transcription enabled:", e);
+    // Revert the toggle on failure
+    transcriptionEnabled = !transcriptionEnabled;
+    transcriptionToggle.checked = transcriptionEnabled;
   }
 }
 

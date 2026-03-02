@@ -91,6 +91,8 @@ pub struct AudioEngine {
     transcribe_state: Arc<std::sync::Mutex<transcription::TranscribeState>>,
     /// Whether the audio loop is running
     audio_loop_active: Arc<AtomicBool>,
+    /// Whether transcription is enabled (independent of capture state)
+    transcription_enabled: Arc<AtomicBool>,
     /// Global shutdown flag
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -128,6 +130,7 @@ impl AudioEngine {
             transcription_queue,
             transcribe_state,
             audio_loop_active: Arc::new(AtomicBool::new(false)),
+            transcription_enabled: Arc::new(AtomicBool::new(true)),
             shutdown_flag,
         })
     }
@@ -166,10 +169,10 @@ impl AudioEngine {
         backend.set_recording_mode(self.config.recording_mode);
         backend.start_capture_sources(source1_id.clone(), source2_id.clone())?;
 
-        // Activate transcribe state
+        // Activate transcribe state (only if transcription is enabled)
         {
             let mut ts = self.transcribe_state.lock().unwrap();
-            ts.is_active = true;
+            ts.is_active = self.transcription_enabled.load(Ordering::SeqCst);
         }
 
         // Start audio processing loop
@@ -177,6 +180,7 @@ impl AudioEngine {
         let shutdown_flag = self.shutdown_flag.clone();
         let event_handler = self.event_handler.clone();
         let transcribe_state = self.transcribe_state.clone();
+        let transcription_enabled = self.transcription_enabled.clone();
 
         let sample_rate = backend.sample_rate();
 
@@ -191,6 +195,12 @@ impl AudioEngine {
             loop {
                 if !loop_active.load(Ordering::SeqCst) || shutdown_flag.load(Ordering::SeqCst) {
                     break;
+                }
+
+                // Sync transcribe_state.is_active with the transcription_enabled flag
+                let txn_enabled = transcription_enabled.load(Ordering::SeqCst);
+                if let Ok(mut ts) = transcribe_state.try_lock() {
+                    ts.is_active = txn_enabled;
                 }
 
                 let audio_data = platform::get_backend().and_then(|b| b.try_recv());
@@ -305,6 +315,17 @@ impl AudioEngine {
         });
 
         result
+    }
+
+    /// Enable or disable real-time transcription without stopping capture.
+    pub fn set_transcription_enabled(&self, enabled: bool) {
+        info!("[Engine] Transcription enabled: {}", enabled);
+        self.transcription_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Whether real-time transcription is currently enabled.
+    pub fn is_transcription_enabled(&self) -> bool {
+        self.transcription_enabled.load(Ordering::SeqCst)
     }
 
     /// Check GPU acceleration status.
