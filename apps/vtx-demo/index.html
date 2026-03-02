@@ -36,19 +36,36 @@
 
       <!-- Visualizations -->
       <section id="visualizations">
-        <div class="viz-panel">
-          <h3>Waveform</h3>
-          <canvas id="waveform-canvas"></canvas>
+        <div class="visualization-container">
+          <div class="visualization-row">
+            <div class="panel-wrapper">
+              <div class="panel-label">Waveform</div>
+              <div class="panel waveform-area">
+                <canvas id="waveform-canvas"></canvas>
+              </div>
+            </div>
+            <div class="panel-wrapper">
+              <div class="panel-label">Spectrogram</div>
+              <div class="panel spectrogram-area">
+                <canvas id="spectrogram-canvas"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="panel-wrapper speech-activity-wrapper">
+            <div class="panel-label">Speech Activity</div>
+            <div class="panel speech-activity-area">
+              <canvas id="speech-canvas"></canvas>
+            </div>
+          </div>
         </div>
-
-        <div class="viz-panel">
-          <h3>Spectrogram</h3>
-          <canvas id="spectrogram-canvas"></canvas>
-        </div>
-
-        <div class="viz-panel">
-          <h3>Speech Activity</h3>
-          <canvas id="speech-canvas"></canvas>
+        <div class="status-legend-row">
+          <div class="speech-activity-legend">
+            <span class="legend-item"><span class="legend-color" style="background: var(--vtx-speech-confirmed);"></span>Speaking</span>
+            <span class="legend-item"><span class="legend-color" style="background: var(--vtx-metric-amplitude);"></span>Amplitude</span>
+            <span class="legend-item"><span class="legend-color" style="background: var(--vtx-metric-zcr);"></span>ZCR</span>
+            <span class="legend-item"><span class="legend-color" style="background: var(--vtx-metric-centroid);"></span>Centroid</span>
+            <span class="legend-item"><span class="legend-color" style="background: var(--vtx-speech-word-break);"></span>Word Break</span>
+          </div>
         </div>
       </section>
 
