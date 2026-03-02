@@ -7,14 +7,12 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 // Import visualization renderers
-// In a published setup you would import from "@vtx-engine/viz"
-// Here we import from the local package source directly
 import {
   WaveformRenderer,
   SpectrogramRenderer,
   SpeechActivityRenderer,
-} from "../../packages/vtx-viz/src/renderers";
-import type { VisualizationPayload } from "../../packages/vtx-viz/src/types";
+} from "@vtx-engine/viz";
+import type { VisualizationPayload } from "@vtx-engine/viz";
 
 // =============================================================================
 // Types matching Rust backend

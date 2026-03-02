@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
-    "@tauri-apps/plugin-dialog": "~2.6.0"
+    "@tauri-apps/plugin-dialog": "~2.6.0",
+    "@vtx-engine/viz": "workspace:*"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.0",

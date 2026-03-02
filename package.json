@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "build:viz": "pnpm --filter @vtx-engine/viz build"
+  }
+}
