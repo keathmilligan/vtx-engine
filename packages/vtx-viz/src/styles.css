@@ -1,0 +1,60 @@
+/* @vtx-engine/viz default theme
+ *
+ * All visualization renderers read colors from these CSS custom properties.
+ * Override these variables in your application to customize the theme.
+ *
+ * Usage:
+ *   import "@vtx-engine/viz/styles";
+ */
+
+:root {
+  /* Background */
+  --vtx-waveform-bg: #0f172a;
+
+  /* Waveform */
+  --vtx-waveform-color: #3b82f6;
+  --vtx-waveform-glow: rgba(59, 130, 246, 0.5);
+  --vtx-waveform-line: #334155;
+  --vtx-waveform-grid: rgba(255, 255, 255, 0.06);
+  --vtx-waveform-text: rgba(255, 255, 255, 0.45);
+
+  /* Spectrogram */
+  --vtx-spectrogram-grid: rgba(255, 255, 255, 0.1);
+
+  /* Speech activity */
+  --vtx-threshold-line: rgba(255, 255, 255, 0.15);
+  --vtx-speech-confirmed: rgba(34, 197, 94, 0.5);
+  --vtx-speech-lookback: rgba(59, 130, 246, 0.7);
+  --vtx-speech-word-break: rgba(249, 115, 22, 0.85);
+
+  /* Metric lines */
+  --vtx-metric-amplitude: rgba(245, 158, 11, 0.75);
+  --vtx-metric-zcr: rgba(6, 182, 212, 0.75);
+  --vtx-metric-centroid: rgba(217, 70, 239, 0.75);
+
+  /* State markers */
+  --vtx-marker-voiced: rgba(34, 197, 94, 0.7);
+  --vtx-marker-whisper: rgba(59, 130, 246, 0.7);
+  --vtx-marker-transient: rgba(239, 68, 68, 0.7);
+}
+
+/* Light theme override */
+[data-theme="light"] {
+  --vtx-waveform-bg: #f1f5f9;
+  --vtx-waveform-color: #2563eb;
+  --vtx-waveform-glow: rgba(37, 99, 235, 0.3);
+  --vtx-waveform-line: #94a3b8;
+  --vtx-waveform-grid: rgba(0, 0, 0, 0.06);
+  --vtx-waveform-text: rgba(0, 0, 0, 0.45);
+  --vtx-spectrogram-grid: rgba(0, 0, 0, 0.1);
+  --vtx-threshold-line: rgba(0, 0, 0, 0.15);
+  --vtx-speech-confirmed: rgba(22, 163, 74, 0.4);
+  --vtx-speech-lookback: rgba(37, 99, 235, 0.5);
+  --vtx-speech-word-break: rgba(234, 88, 12, 0.7);
+  --vtx-metric-amplitude: rgba(217, 119, 6, 0.75);
+  --vtx-metric-zcr: rgba(8, 145, 178, 0.75);
+  --vtx-metric-centroid: rgba(168, 85, 247, 0.75);
+  --vtx-marker-voiced: rgba(22, 163, 74, 0.6);
+  --vtx-marker-whisper: rgba(37, 99, 235, 0.6);
+  --vtx-marker-transient: rgba(220, 38, 38, 0.6);
+}

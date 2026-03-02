@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for vtx-demo",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}

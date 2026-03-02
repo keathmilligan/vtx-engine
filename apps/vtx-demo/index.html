@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>vtx-engine Demo</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>vtx-engine Demo</h1>
+      <div id="status-bar">
+        <span id="status-text">Initializing...</span>
+        <span id="model-status"></span>
+      </div>
+    </header>
+
+    <main>
+      <!-- Controls -->
+      <section id="controls">
+        <div class="control-group">
+          <label for="device-select">Input Device:</label>
+          <select id="device-select">
+            <option value="">Loading devices...</option>
+          </select>
+          <button id="btn-record" disabled>Record</button>
+          <button id="btn-stop" disabled>Stop</button>
+        </div>
+
+        <div class="control-group">
+          <button id="btn-open-file">Open WAV File</button>
+          <button id="btn-download-model" style="display:none">Download Model</button>
+        </div>
+      </section>
+
+      <!-- Visualizations -->
+      <section id="visualizations">
+        <div class="viz-panel">
+          <h3>Waveform</h3>
+          <canvas id="waveform-canvas"></canvas>
+        </div>
+
+        <div class="viz-panel">
+          <h3>Spectrogram</h3>
+          <canvas id="spectrogram-canvas"></canvas>
+        </div>
+
+        <div class="viz-panel">
+          <h3>Speech Activity</h3>
+          <canvas id="speech-canvas"></canvas>
+        </div>
+      </section>
+
+      <!-- Transcription Output -->
+      <section id="transcription">
+        <h3>Transcription</h3>
+        <div id="transcription-output">
+          <p class="placeholder">Transcription results will appear here...</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

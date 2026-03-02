@@ -1,0 +1,10 @@
+[package]
+name = "vtx-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types for the vtx-engine voice processing library"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

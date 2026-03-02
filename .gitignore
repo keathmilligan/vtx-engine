@@ -1,0 +1,8 @@
+.opencode/
+target/
+node_modules/
+dist/
+*.dll
+*.dylib
+*.so
+.env

@@ -1,0 +1,27 @@
+{
+  "name": "@vtx-engine/viz",
+  "version": "0.1.0",
+  "description": "Audio visualization components for vtx-engine - waveform, spectrogram, and speech activity renderers",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./styles": "./dist/styles.css"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  },
+  "license": "MIT"
+}

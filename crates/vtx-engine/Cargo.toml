@@ -1,0 +1,89 @@
+[package]
+name = "vtx-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Voice processing and transcription engine - audio capture, speech detection, and Whisper transcription"
+
+[lib]
+name = "vtx_engine"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable CUDA GPU acceleration for transcription.
+# - Windows: prebuilt CUDA binaries are always used; this flag has no effect.
+# - Linux: Requires NVIDIA CUDA Toolkit at build time.
+# - macOS: No effect (Metal is used automatically).
+cuda = []
+
+[build-dependencies]
+reqwest = { version = "0.12", features = ["blocking"] }
+zip = "2"
+
+[dependencies]
+vtx-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# Dynamic library loading for whisper.cpp FFI
+libloading = "0.8"
+
+# HTTP client for model downloading
+reqwest = { version = "0.12", features = ["blocking", "stream"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Audio file handling
+hound = "3.5"
+
+# FFT for spectrogram
+rustfft = "6.2"
+
+# Date/time for filenames
+chrono = "0.4"
+
+# Async stream support for model download
+futures = "0.3"
+
+# File paths
+directories = "5"
+
+# =============================================================================
+# Platform-specific dependencies
+# =============================================================================
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+aec3 = "0.1"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aec3 = "0.1"
+pipewire = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = "0.11"
+screencapturekit-sys = "0.2"
+core-foundation = "0.10"
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSError", "dispatch", "block2", "NSGeometry", "NSValue", "NSUUID"] }
+block2 = "0.5"
+dispatch = "0.2"
+aec3 = "0.1"
+libc = "0.2"

@@ -1,0 +1,256 @@
+/* vtx-engine Demo App Styles */
+
+/* vtx-viz theme variables */
+:root {
+  --vtx-waveform-bg: #0f172a;
+  --vtx-waveform-color: #3b82f6;
+  --vtx-waveform-glow: rgba(59, 130, 246, 0.5);
+  --vtx-waveform-line: #334155;
+  --vtx-waveform-grid: rgba(255, 255, 255, 0.06);
+  --vtx-waveform-text: rgba(255, 255, 255, 0.45);
+  --vtx-spectrogram-grid: rgba(255, 255, 255, 0.1);
+  --vtx-threshold-line: rgba(255, 255, 255, 0.15);
+  --vtx-speech-confirmed: rgba(34, 197, 94, 0.5);
+  --vtx-speech-lookback: rgba(59, 130, 246, 0.7);
+  --vtx-speech-word-break: rgba(249, 115, 22, 0.85);
+  --vtx-metric-amplitude: rgba(245, 158, 11, 0.75);
+  --vtx-metric-zcr: rgba(6, 182, 212, 0.75);
+  --vtx-metric-centroid: rgba(217, 70, 239, 0.75);
+  --vtx-marker-voiced: rgba(34, 197, 94, 0.7);
+  --vtx-marker-whisper: rgba(59, 130, 246, 0.7);
+  --vtx-marker-transient: rgba(239, 68, 68, 0.7);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  overflow-x: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+#status-bar {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+#status-text {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #334155;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+/* Controls */
+#controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.control-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+label {
+  font-size: 13px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+select {
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  min-width: 250px;
+  cursor: pointer;
+}
+
+select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+button {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+button:disabled {
+  background: #475569;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+button#btn-stop {
+  background: #ef4444;
+}
+
+button#btn-stop:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+button#btn-open-file {
+  background: #8b5cf6;
+}
+
+button#btn-open-file:hover:not(:disabled) {
+  background: #7c3aed;
+}
+
+button#btn-download-model {
+  background: #f59e0b;
+  color: #1e293b;
+}
+
+button#btn-download-model:hover:not(:disabled) {
+  background: #d97706;
+}
+
+/* Visualizations */
+#visualizations {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.viz-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+}
+
+.viz-panel h3 {
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.viz-panel canvas {
+  flex: 1;
+  width: 100%;
+  border-radius: 6px;
+  background: #0f172a;
+}
+
+/* Transcription */
+#transcription {
+  flex-shrink: 0;
+}
+
+#transcription h3 {
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+#transcription-output {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 12px;
+  min-height: 60px;
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#transcription-output .placeholder {
+  color: #64748b;
+  font-style: italic;
+}
+
+#transcription-output .result {
+  margin-bottom: 4px;
+  padding: 4px 0;
+  border-bottom: 1px solid #334155;
+}
+
+#transcription-output .result:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+#transcription-output .result .time {
+  font-size: 11px;
+  color: #64748b;
+  margin-right: 8px;
+}
+
+/* Progress bar for model download */
+.progress-bar {
+  width: 200px;
+  height: 6px;
+  background: #334155;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar .fill {
+  height: 100%;
+  background: #3b82f6;
+  transition: width 0.2s;
+}
