@@ -120,6 +120,11 @@ impl AudioEngine {
         let transcription_queue = Arc::new(transcription::TranscriptionQueue::new());
         transcription_queue.set_callback(Arc::new(callback));
 
+        // Start the worker thread that pulls from the queue and runs Whisper.
+        // This must happen once at engine creation; without it no segments are ever processed.
+        let model_path = transcription::Transcriber::new().get_model_path().clone();
+        transcription_queue.start_worker(model_path);
+
         let transcribe_state = Arc::new(std::sync::Mutex::new(
             transcription::TranscribeState::new(transcription_queue.clone()),
         ));
@@ -169,9 +174,14 @@ impl AudioEngine {
         backend.set_recording_mode(self.config.recording_mode);
         backend.start_capture_sources(source1_id.clone(), source2_id.clone())?;
 
-        // Activate transcribe state (only if transcription is enabled)
+        let sample_rate = backend.sample_rate();
+        // WASAPI always outputs stereo (2 channels) after its internal mono->stereo
+        // conversion.  Other backends follow the same convention.  We initialise
+        // TranscribeState here so duration math is correct from the very first
+        // callback without needing to touch the mutex inside the hot audio loop.
         {
             let mut ts = self.transcribe_state.lock().unwrap();
+            ts.init_for_capture(sample_rate, 2);
             ts.is_active = self.transcription_enabled.load(Ordering::SeqCst);
         }
 
@@ -182,8 +192,6 @@ impl AudioEngine {
         let transcribe_state = self.transcribe_state.clone();
         let transcription_enabled = self.transcription_enabled.clone();
 
-        let sample_rate = backend.sample_rate();
-
         loop_active.store(true, Ordering::SeqCst);
 
         thread::spawn(move || {
@@ -191,16 +199,13 @@ impl AudioEngine {
 
             let mut speech_detector = processor::SpeechDetector::new(sample_rate);
             let mut viz_processor = processor::VisualizationProcessor::new(sample_rate, 256);
+            // Pending speech events survive a try_lock miss so they are never dropped.
+            let mut pending_state_change = processor::SpeechStateChange::None;
+            let mut pending_word_break: Option<processor::WordBreakEvent> = None;
 
             loop {
                 if !loop_active.load(Ordering::SeqCst) || shutdown_flag.load(Ordering::SeqCst) {
                     break;
-                }
-
-                // Sync transcribe_state.is_active with the transcription_enabled flag
-                let txn_enabled = transcription_enabled.load(Ordering::SeqCst);
-                if let Ok(mut ts) = transcribe_state.try_lock() {
-                    ts.is_active = txn_enabled;
                 }
 
                 let audio_data = platform::get_backend().and_then(|b| b.try_recv());
@@ -221,31 +226,58 @@ impl AudioEngine {
                         event_handler.on_event(EngineEvent::VisualizationData(viz));
                     }
 
-                    // Handle speech state changes
-                    let state_change = speech_detector.take_state_change();
-                    let word_break = speech_detector.take_word_break_event();
+                    // Merge any new speech events from this batch with any that
+                    // survived a previous try_lock miss (so events are never lost).
+                    let new_state = speech_detector.take_state_change();
+                    let new_wb = speech_detector.take_word_break_event();
 
+                    // A new terminal event (Started / Ended) always wins over a
+                    // previously pending None; a None does not overwrite a pending event.
+                    match new_state {
+                        processor::SpeechStateChange::None => {}
+                        other => pending_state_change = other,
+                    }
+                    if new_wb.is_some() {
+                        pending_word_break = new_wb;
+                    }
+
+                    // Try to acquire the transcription state lock without blocking.
+                    // The mutex is only held briefly by start_capture/stop_capture;
+                    // if we miss a cycle we retry next iteration with events still pending.
                     if let Ok(mut ts) = transcribe_state.try_lock() {
-                        if ts.is_active {
-                            ts.process_samples(&data.samples);
+                        ts.is_active = transcription_enabled.load(Ordering::SeqCst);
 
-                            match state_change {
-                                processor::SpeechStateChange::Started { lookback_samples } => {
-                                    ts.on_speech_started(lookback_samples);
-                                    event_handler.on_event(EngineEvent::SpeechStarted);
-                                }
-                                processor::SpeechStateChange::Ended { duration_ms } => {
-                                    ts.on_speech_ended();
-                                    event_handler.on_event(EngineEvent::SpeechEnded { duration_ms });
-                                }
-                                processor::SpeechStateChange::None => {}
+                        if ts.is_active {
+                            // Apply speech-start BEFORE writing so index_from_lookback()
+                            // references the write_pos from the previous batch.
+                            if let processor::SpeechStateChange::Started { lookback_samples } =
+                                &pending_state_change
+                            {
+                                ts.on_speech_started(*lookback_samples);
+                                event_handler.on_event(EngineEvent::SpeechStarted);
                             }
 
-                            if let Some(wb) = word_break {
+                            ts.process_samples(&data.samples);
+
+                            if let processor::SpeechStateChange::Ended { duration_ms } =
+                                pending_state_change
+                            {
+                                ts.on_speech_ended();
+                                event_handler
+                                    .on_event(EngineEvent::SpeechEnded { duration_ms });
+                            }
+
+                            if let Some(wb) = pending_word_break.take() {
                                 ts.on_word_break(wb.offset_ms, wb.gap_duration_ms);
                             }
                         }
+
+                        // Events consumed — reset pending state.
+                        pending_state_change = processor::SpeechStateChange::None;
+                        pending_word_break = None;
                     }
+                    // If try_lock failed, pending_state_change / pending_word_break
+                    // are retained and will be applied on the next successful lock.
                 } else {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -266,12 +298,6 @@ impl AudioEngine {
     /// Stop audio capture.
     pub async fn stop_capture(&self) -> Result<(), String> {
         self.audio_loop_active.store(false, Ordering::SeqCst);
-
-        // Deactivate transcribe state
-        {
-            let mut ts = self.transcribe_state.lock().unwrap();
-            ts.is_active = false;
-        }
 
         if let Some(backend) = platform::get_backend() {
             backend.stop_capture()?;
@@ -317,6 +343,16 @@ impl AudioEngine {
         result
     }
 
+    /// Enable or disable echo cancellation. Takes effect on the next `start_capture` call.
+    pub fn set_aec_enabled(&self, enabled: bool) {
+        info!("[Engine] AEC enabled: {}", enabled);
+        // Update the config value — requires interior mutability via a cell
+        // We use the backend directly so it takes effect immediately for the next capture.
+        if let Some(backend) = platform::get_backend() {
+            backend.set_aec_enabled(enabled);
+        }
+    }
+
     /// Enable or disable real-time transcription without stopping capture.
     pub fn set_transcription_enabled(&self, enabled: bool) {
         info!("[Engine] Transcription enabled: {}", enabled);
@@ -326,6 +362,47 @@ impl AudioEngine {
     /// Whether real-time transcription is currently enabled.
     pub fn is_transcription_enabled(&self) -> bool {
         self.transcription_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Enable or disable PTT (push-to-talk) mode for transcription.
+    ///
+    /// When PTT mode is enabled, automatic speech-based segmentation is disabled.
+    /// Audio is accumulated in the ring buffer and only submitted when
+    /// `finalize_segment` is called (typically when recording is stopped).
+    ///
+    /// When PTT mode is disabled (the default), segments are automatically
+    /// submitted based on speech detection events.
+    pub fn set_ptt_mode(&self, enabled: bool) {
+        info!("[Engine] PTT mode: {}", enabled);
+        if let Ok(mut ts) = self.transcribe_state.lock() {
+            ts.set_ptt_mode(enabled);
+        }
+    }
+
+    /// Whether PTT mode is currently enabled.
+    pub fn is_ptt_mode(&self) -> bool {
+        self.transcribe_state
+            .lock()
+            .map(|ts| ts.ptt_mode)
+            .unwrap_or(false)
+    }
+
+    /// Finalize and submit the current recording session for transcription.
+    ///
+    /// In PTT mode (auto-transcription disabled), this submits all audio accumulated
+    /// in the ring buffer since recording started. Should be called before `stop_capture`.
+    ///
+    /// In automatic mode this is effectively a no-op since segments are submitted
+    /// continuously via VAD events.
+    pub fn finalize_segment(&self) {
+        info!("[Engine] Finalizing recording session for transcription");
+        if let Ok(mut ts) = self.transcribe_state.lock() {
+            if ts.ptt_mode {
+                ts.submit_session();
+            } else {
+                ts.finalize();
+            }
+        }
     }
 
     /// Check GPU acceleration status.

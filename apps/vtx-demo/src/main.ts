@@ -42,6 +42,60 @@ interface TranscriptionResult {
 }
 
 // =============================================================================
+// Settings persistence
+// =============================================================================
+
+const SETTINGS_KEY = "vtx-demo-settings";
+
+interface AppSettings {
+  transcriptionEnabled: boolean;
+  autoTranscriptionEnabled: boolean;
+  aecEnabled: boolean;
+  primaryDeviceId: string;
+  secondaryDeviceId: string;
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      return { ...defaultSettings(), ...JSON.parse(raw) };
+    }
+  } catch {
+    // Ignore parse errors — fall through to defaults
+  }
+  return defaultSettings();
+}
+
+function defaultSettings(): AppSettings {
+  return {
+    transcriptionEnabled: true,
+    autoTranscriptionEnabled: false,
+    aecEnabled: false,
+    primaryDeviceId: "",
+    secondaryDeviceId: "",
+  };
+}
+
+function saveSettings(settings: AppSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function getCurrentSettings(): AppSettings {
+  return {
+    transcriptionEnabled,
+    autoTranscriptionEnabled,
+    aecEnabled,
+    primaryDeviceId: deviceSelect.value,
+    secondaryDeviceId: deviceSelect2.value,
+  };
+}
+
+// =============================================================================
 // State
 // =============================================================================
 
@@ -49,7 +103,12 @@ let isRecording = false;
 let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
-let transcriptionEnabled = true;
+
+// Load persisted settings
+const settings = loadSettings();
+let transcriptionEnabled = settings.transcriptionEnabled;
+let autoTranscriptionEnabled = settings.autoTranscriptionEnabled;
+let aecEnabled = settings.aecEnabled;
 
 // =============================================================================
 // DOM Elements
@@ -62,8 +121,10 @@ const modelNameEl = document.getElementById("model-name")!;
 const deviceSelect = document.getElementById(
   "device-select"
 ) as HTMLSelectElement;
-const btnRecord = document.getElementById("btn-record") as HTMLButtonElement;
-const btnStop = document.getElementById("btn-stop") as HTMLButtonElement;
+const deviceSelect2 = document.getElementById(
+  "device-select-2"
+) as HTMLSelectElement;
+const btnCapture = document.getElementById("btn-capture") as HTMLButtonElement;
 const btnOpenFile = document.getElementById(
   "btn-open-file"
 ) as HTMLButtonElement;
@@ -73,6 +134,12 @@ const btnDownloadModel = document.getElementById(
 const transcriptionToggle = document.getElementById(
   "transcription-toggle"
 ) as HTMLInputElement;
+const autoTranscriptionToggle = document.getElementById(
+  "auto-transcription-toggle"
+) as HTMLInputElement;
+const aecToggle = document.getElementById(
+  "aec-toggle"
+) as HTMLInputElement;
 const transcriptionOutput = document.getElementById("transcription-output")!;
 
 // =============================================================================
@@ -80,6 +147,11 @@ const transcriptionOutput = document.getElementById("transcription-output")!;
 // =============================================================================
 
 async function init() {
+  // Apply persisted toggle states to DOM
+  transcriptionToggle.checked = transcriptionEnabled;
+  autoTranscriptionToggle.checked = autoTranscriptionEnabled;
+  aecToggle.checked = aecEnabled;
+
   // Set up renderers
   setupRenderers();
 
@@ -89,13 +161,32 @@ async function init() {
   // Listen for backend events
   await setupBackendListeners();
 
-  // Wait a moment for engine to initialize, then load devices
+  // Wait a moment for engine to initialize, then load devices and sync backend state
   setTimeout(async () => {
     await loadDevices();
     await checkModelStatus();
     await checkGpuStatus();
+
+    // Sync toggle states to the backend after engine is ready
+    await syncTogglesToBackend();
+
     statusText.textContent = "Ready";
   }, 1000);
+}
+
+/** Sync current toggle states to the Rust backend after engine init. */
+async function syncTogglesToBackend() {
+  try {
+    await invoke("set_transcription_enabled", { enabled: transcriptionEnabled });
+  } catch (e) {
+    console.error("Failed to sync transcription enabled:", e);
+  }
+  try {
+    // auto-transcription OFF means PTT mode ON
+    await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled });
+  } catch (e) {
+    console.error("Failed to sync PTT mode:", e);
+  }
 }
 
 function setupRenderers() {
@@ -127,11 +218,16 @@ function setupRenderers() {
 }
 
 function setupEventListeners() {
-  btnRecord.addEventListener("click", startRecording);
-  btnStop.addEventListener("click", stopRecording);
+  btnCapture.addEventListener("click", toggleRecording);
   btnOpenFile.addEventListener("click", openWavFile);
   btnDownloadModel.addEventListener("click", downloadModel);
   transcriptionToggle.addEventListener("change", onTranscriptionToggle);
+  autoTranscriptionToggle.addEventListener("change", onAutoTranscriptionToggle);
+  aecToggle.addEventListener("change", onAecToggle);
+
+  // Save device selections on change
+  deviceSelect.addEventListener("change", () => saveSettings(getCurrentSettings()));
+  deviceSelect2.addEventListener("change", () => saveSettings(getCurrentSettings()));
 }
 
 async function setupBackendListeners() {
@@ -207,35 +303,95 @@ async function setupBackendListeners() {
 // Device Management
 // =============================================================================
 
+function makeOption(device: AudioDevice): HTMLOptionElement {
+  const opt = document.createElement("option");
+  opt.value = device.id;
+  opt.textContent = device.name;
+  return opt;
+}
+
+function buildDeviceGroups(
+  inputDevices: AudioDevice[],
+  systemDevices: AudioDevice[],
+  includeNone: boolean
+): DocumentFragment {
+  const frag = document.createDocumentFragment();
+
+  if (includeNone) {
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "";
+    noneOpt.textContent = "None";
+    frag.appendChild(noneOpt);
+  }
+
+  if (inputDevices.length > 0) {
+    const micGroup = document.createElement("optgroup");
+    micGroup.label = "Microphone / Input";
+    for (const device of inputDevices) {
+      micGroup.appendChild(makeOption(device));
+    }
+    frag.appendChild(micGroup);
+  }
+
+  if (systemDevices.length > 0) {
+    const sysGroup = document.createElement("optgroup");
+    sysGroup.label = "System Audio (Loopback)";
+    for (const device of systemDevices) {
+      sysGroup.appendChild(makeOption(device));
+    }
+    frag.appendChild(sysGroup);
+  }
+
+  return frag;
+}
+
 async function loadDevices() {
   try {
-    const devices = await invoke<AudioDevice[]>("list_input_devices");
+    const [inputDevices, systemDevices] = await Promise.all([
+      invoke<AudioDevice[]>("list_input_devices"),
+      invoke<AudioDevice[]>("list_system_devices"),
+    ]);
 
-    deviceSelect.innerHTML = "";
+    const hasDevices = inputDevices.length > 0 || systemDevices.length > 0;
 
-    if (devices.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "No input devices found";
-      deviceSelect.appendChild(opt);
+    if (!hasDevices) {
+      for (const sel of [deviceSelect, deviceSelect2]) {
+        sel.innerHTML = "";
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "No devices found";
+        sel.appendChild(opt);
+      }
       return;
     }
 
-    for (const device of devices) {
-      const opt = document.createElement("option");
-      opt.value = device.id;
-      opt.textContent = device.name;
-      deviceSelect.appendChild(opt);
+    // Primary: no leading None — must pick something
+    deviceSelect.innerHTML = "";
+    deviceSelect.appendChild(buildDeviceGroups(inputDevices, systemDevices, false));
+
+    // Secondary: same list but with a leading None option
+    deviceSelect2.innerHTML = "";
+    deviceSelect2.appendChild(buildDeviceGroups(inputDevices, systemDevices, true));
+
+    // Restore saved device selections if they still exist in the list
+    const allDeviceIds = [...inputDevices, ...systemDevices].map((d) => d.id);
+    if (settings.primaryDeviceId && allDeviceIds.includes(settings.primaryDeviceId)) {
+      deviceSelect.value = settings.primaryDeviceId;
+    }
+    if (settings.secondaryDeviceId === "" || allDeviceIds.includes(settings.secondaryDeviceId)) {
+      deviceSelect2.value = settings.secondaryDeviceId;
     }
 
-    btnRecord.disabled = false;
+    btnCapture.disabled = false;
   } catch (e) {
     console.error("Failed to load devices:", e);
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "Failed to load devices";
-    deviceSelect.innerHTML = "";
-    deviceSelect.appendChild(opt);
+    for (const sel of [deviceSelect, deviceSelect2]) {
+      sel.innerHTML = "";
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Failed to load devices";
+      sel.appendChild(opt);
+    }
   }
 }
 
@@ -243,16 +399,33 @@ async function loadDevices() {
 // Recording
 // =============================================================================
 
+async function toggleRecording() {
+  if (isRecording) {
+    await stopRecording();
+  } else {
+    await startRecording();
+  }
+}
+
 async function startRecording() {
   const deviceId = deviceSelect.value;
   if (!deviceId) return;
 
+  const source2Id = deviceSelect2.value || null;
+
   try {
-    await invoke("start_capture", { sourceId: deviceId });
+    await invoke("start_capture", {
+      sourceId: deviceId,
+      source2Id: source2Id,
+      aecEnabled: aecEnabled,
+    });
     isRecording = true;
-    btnRecord.disabled = true;
-    btnStop.disabled = false;
+    btnCapture.textContent = "Stop";
+    btnCapture.classList.add("recording");
     deviceSelect.disabled = true;
+    deviceSelect2.disabled = true;
+    aecToggle.disabled = true;
+    autoTranscriptionToggle.disabled = true;
     statusText.textContent = "Capturing...";
 
     // Start renderers
@@ -267,11 +440,24 @@ async function startRecording() {
 
 async function stopRecording() {
   try {
+    // In manual mode (auto-transcription OFF), finalize the accumulated segment
+    // before stopping capture so the audio is submitted for transcription.
+    if (!autoTranscriptionEnabled && transcriptionEnabled) {
+      try {
+        await invoke("finalize_segment");
+      } catch (e) {
+        console.error("Failed to finalize segment:", e);
+      }
+    }
+
     await invoke("stop_capture");
     isRecording = false;
-    btnRecord.disabled = false;
-    btnStop.disabled = true;
+    btnCapture.textContent = "Record";
+    btnCapture.classList.remove("recording");
     deviceSelect.disabled = false;
+    deviceSelect2.disabled = false;
+    aecToggle.disabled = false;
+    autoTranscriptionToggle.disabled = false;
     statusText.textContent = "Ready";
 
     // Stop renderers
@@ -387,6 +573,7 @@ async function checkGpuStatus() {
 
 async function onTranscriptionToggle() {
   transcriptionEnabled = transcriptionToggle.checked;
+  saveSettings(getCurrentSettings());
   try {
     await invoke("set_transcription_enabled", { enabled: transcriptionEnabled });
   } catch (e) {
@@ -394,7 +581,28 @@ async function onTranscriptionToggle() {
     // Revert the toggle on failure
     transcriptionEnabled = !transcriptionEnabled;
     transcriptionToggle.checked = transcriptionEnabled;
+    saveSettings(getCurrentSettings());
   }
+}
+
+async function onAutoTranscriptionToggle() {
+  autoTranscriptionEnabled = autoTranscriptionToggle.checked;
+  saveSettings(getCurrentSettings());
+  try {
+    // auto-transcription OFF means PTT mode ON (manual submission on stop)
+    await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled });
+  } catch (e) {
+    console.error("Failed to set PTT mode:", e);
+    // Revert the toggle on failure
+    autoTranscriptionEnabled = !autoTranscriptionEnabled;
+    autoTranscriptionToggle.checked = autoTranscriptionEnabled;
+    saveSettings(getCurrentSettings());
+  }
+}
+
+function onAecToggle() {
+  aecEnabled = aecToggle.checked;
+  saveSettings(getCurrentSettings());
 }
 
 // =============================================================================

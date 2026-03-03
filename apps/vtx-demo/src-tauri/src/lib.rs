@@ -86,13 +86,23 @@ async fn list_input_devices(state: tauri::State<'_, AppState>) -> Result<Vec<Aud
 }
 
 #[tauri::command]
+async fn list_system_devices(state: tauri::State<'_, AppState>) -> Result<Vec<AudioDevice>, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    Ok(engine.list_system_devices())
+}
+
+#[tauri::command]
 async fn start_capture(
     state: tauri::State<'_, AppState>,
     source_id: String,
+    source2_id: Option<String>,
+    aec_enabled: Option<bool>,
 ) -> Result<(), String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.start_capture(Some(source_id), None).await
+    engine.set_aec_enabled(aec_enabled.unwrap_or(false));
+    engine.start_capture(Some(source_id), source2_id).await
 }
 
 #[tauri::command]
@@ -165,6 +175,32 @@ async fn is_transcription_enabled(state: tauri::State<'_, AppState>) -> Result<b
     Ok(engine.is_transcription_enabled())
 }
 
+#[tauri::command]
+async fn set_ptt_mode(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.set_ptt_mode(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn is_ptt_mode(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    Ok(engine.is_ptt_mode())
+}
+
+#[tauri::command]
+async fn finalize_segment(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.finalize_segment();
+    Ok(())
+}
+
 // =============================================================================
 // App Entry Point
 // =============================================================================
@@ -217,6 +253,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_input_devices,
+            list_system_devices,
             start_capture,
             stop_capture,
             is_capturing,
@@ -227,6 +264,9 @@ pub fn run() {
             get_gpu_status,
             set_transcription_enabled,
             is_transcription_enabled,
+            set_ptt_mode,
+            is_ptt_mode,
+            finalize_segment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

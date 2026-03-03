@@ -211,7 +211,7 @@ pub struct TranscribeState {
     /// Callback for state events
     callback: Option<Arc<dyn TranscribeStateCallback>>,
     /// PTT mode - disables automatic segmentation
-    ptt_mode: bool,
+    pub ptt_mode: bool,
 }
 
 impl TranscribeState {
@@ -234,14 +234,54 @@ impl TranscribeState {
         }
     }
 
-    /// Enable or disable PTT mode.
-    /// In PTT mode, automatic segmentation is disabled - segments are only
-    /// submitted when explicitly ended via on_speech_ended().
+    /// Enable or disable PTT (push-to-talk / manual) mode.
+    ///
+    /// In PTT mode all VAD-driven segmentation is suppressed — `on_speech_started`,
+    /// `on_speech_ended`, and `on_word_break` are all ignored.  Audio is written
+    /// continuously to the ring buffer and submitted only when `submit_session` is
+    /// called explicitly (typically when recording is stopped).
     pub fn set_ptt_mode(&mut self, enabled: bool) {
         self.ptt_mode = enabled;
         if enabled {
-            tracing::debug!("[TranscribeState] PTT mode enabled - automatic segmentation disabled");
+            tracing::debug!("[TranscribeState] PTT mode enabled - all VAD segmentation disabled");
+        } else {
+            tracing::debug!(
+                "[TranscribeState] PTT mode disabled - automatic VAD segmentation active"
+            );
         }
+    }
+
+    /// Submit the entire accumulated session audio for transcription.
+    ///
+    /// Extracts all audio written to the ring buffer since the session started
+    /// (from `segment_start_idx` to the current write position) and queues it.
+    ///
+    /// Intended for use at the end of a manual (PTT) recording session.
+    pub fn submit_session(&mut self) {
+        if !self.is_active {
+            return;
+        }
+
+        let segment = self.ring_buffer.extract_segment(self.segment_start_idx);
+
+        if segment.is_empty() {
+            tracing::debug!("[TranscribeState] submit_session: no audio accumulated");
+            return;
+        }
+
+        tracing::info!(
+            "[TranscribeState] submit_session: submitting {} samples from ring buffer",
+            segment.len()
+        );
+
+        // Reset session state
+        self.in_speech = false;
+        self.segment_sample_count = 0;
+        self.seeking_word_break = false;
+        self.lookback_sample_count = 0;
+        self.segment_start_idx = self.ring_buffer.write_position();
+
+        self.queue_segment(segment);
     }
 
     /// Set the callback for state events.
@@ -375,7 +415,7 @@ impl TranscribeState {
     /// Note: `lookback_samples` from the speech detector is in MONO samples (frames).
     /// We need to convert to stereo samples for the ring buffer which stores interleaved stereo.
     pub fn on_speech_started(&mut self, lookback_samples: usize) {
-        if !self.is_active {
+        if !self.is_active || self.ptt_mode {
             return;
         }
 
@@ -401,7 +441,7 @@ impl TranscribeState {
 
     /// Handle speech-ended event: extract segment and queue for transcription
     pub fn on_speech_ended(&mut self) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech {
+        if !self.is_active || !self.in_speech || self.ptt_mode {
             return None;
         }
 
@@ -457,7 +497,7 @@ impl TranscribeState {
     /// This ensures we capture all speech before the pause and don't accidentally cut into
     /// the end of a word. The next segment will naturally start from this point.
     pub fn on_word_break(&mut self, offset_ms: u32, gap_duration_ms: u32) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || !self.seeking_word_break {
+        if !self.is_active || !self.in_speech || !self.seeking_word_break || self.ptt_mode {
             return None;
         }
 
