@@ -14,6 +14,11 @@ use super::queue::{QueuedSegment, TranscriptionQueue};
 /// 48000 * 30 * 2 = 2,880,000 samples
 const RING_BUFFER_CAPACITY: usize = 48000 * 30 * 2;
 
+/// Maximum PTT (manual) recording buffer duration: 30 minutes at 48kHz stereo.
+/// 48000 * 60 * 30 * 2 = 172,800,000 samples (~660 MB of f32).
+/// Audio beyond this limit is silently dropped and a warning is emitted once.
+const PTT_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30 * 2;
+
 /// Overflow threshold: 90% of buffer capacity
 const OVERFLOW_THRESHOLD_PERCENT: usize = 90;
 
@@ -212,6 +217,15 @@ pub struct TranscribeState {
     callback: Option<Arc<dyn TranscribeStateCallback>>,
     /// PTT mode - disables automatic segmentation
     pub ptt_mode: bool,
+    /// Growable audio accumulator for PTT (manual) recording sessions.
+    ///
+    /// In PTT mode audio is appended here instead of relying on the ring buffer,
+    /// so the full session is preserved without wraparound loss.  Capped at
+    /// `PTT_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz stereo).
+    ptt_audio_buffer: Vec<f32>,
+    /// Set to true after the first time the PTT buffer hits the 30-minute cap,
+    /// so the overflow warning is emitted only once per session.
+    ptt_buffer_full_warned: bool,
 }
 
 impl TranscribeState {
@@ -231,6 +245,8 @@ impl TranscribeState {
             lookback_sample_count: 0,
             callback: None,
             ptt_mode: false,
+            ptt_audio_buffer: Vec::new(),
+            ptt_buffer_full_warned: false,
         }
     }
 
@@ -251,10 +267,11 @@ impl TranscribeState {
         }
     }
 
-    /// Submit the entire accumulated session audio for transcription.
+    /// Submit the entire accumulated PTT session audio for transcription.
     ///
-    /// Extracts all audio written to the ring buffer since the session started
-    /// (from `segment_start_idx` to the current write position) and queues it.
+    /// Drains the `ptt_audio_buffer` (the growable Vec accumulated during the
+    /// manual recording session) and queues it for transcription.  The ring
+    /// buffer is not consulted here — all PTT audio lives in `ptt_audio_buffer`.
     ///
     /// Intended for use at the end of a manual (PTT) recording session.
     pub fn submit_session(&mut self) {
@@ -262,7 +279,10 @@ impl TranscribeState {
             return;
         }
 
-        let segment = self.ring_buffer.extract_segment(self.segment_start_idx);
+        // Take ownership of the accumulated audio and reset the buffer so the
+        // struct is immediately ready for the next session.
+        let segment: Vec<f32> = std::mem::take(&mut self.ptt_audio_buffer);
+        self.ptt_buffer_full_warned = false;
 
         if segment.is_empty() {
             tracing::debug!("[TranscribeState] submit_session: no audio accumulated");
@@ -270,8 +290,9 @@ impl TranscribeState {
         }
 
         tracing::info!(
-            "[TranscribeState] submit_session: submitting {} samples from ring buffer",
-            segment.len()
+            "[TranscribeState] submit_session: submitting {} samples ({:.1}s) from PTT buffer",
+            segment.len(),
+            segment.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
         );
 
         // Reset session state
@@ -305,6 +326,8 @@ impl TranscribeState {
         self.seeking_word_break = false;
         self.word_break_seek_start_samples = 0;
         self.lookback_sample_count = 0;
+        self.ptt_audio_buffer.clear();
+        self.ptt_buffer_full_warned = false;
     }
 
     /// Activate transcribe mode
@@ -333,12 +356,36 @@ impl TranscribeState {
             return None;
         }
 
-        // In PTT mode, skip all automatic segmentation - just write samples
+        // In PTT mode, skip all automatic segmentation.
+        // Append audio to the dedicated PTT buffer up to the 30-minute cap.
         if self.ptt_mode {
-            self.ring_buffer.write(samples);
-            if self.in_speech {
-                self.segment_sample_count += samples.len() as u64;
+            let remaining_capacity =
+                PTT_MAX_BUFFER_SAMPLES.saturating_sub(self.ptt_audio_buffer.len());
+
+            if remaining_capacity == 0 {
+                // Buffer is already at the cap — emit one warning and drop all further audio.
+                if !self.ptt_buffer_full_warned {
+                    tracing::warn!(
+                        "[TranscribeState] PTT recording has reached the 30-minute maximum \
+                         buffer limit. Further audio will be discarded."
+                    );
+                    self.ptt_buffer_full_warned = true;
+                }
+            } else {
+                // Accept as many samples as fit within the cap.
+                let samples_to_write = samples.len().min(remaining_capacity);
+                self.ptt_audio_buffer
+                    .extend_from_slice(&samples[..samples_to_write]);
+
+                if samples_to_write < samples.len() && !self.ptt_buffer_full_warned {
+                    tracing::warn!(
+                        "[TranscribeState] PTT recording has reached the 30-minute maximum \
+                         buffer limit. Further audio will be discarded."
+                    );
+                    self.ptt_buffer_full_warned = true;
+                }
             }
+
             return None;
         }
 
