@@ -19,33 +19,6 @@
     </header>
 
     <main>
-      <!-- Controls -->
-      <section id="controls">
-        <div class="control-group">
-          <label for="device-select">Input Device:</label>
-          <select id="device-select">
-            <option value="">Loading devices...</option>
-          </select>
-          <button id="btn-record" disabled>Record</button>
-          <button id="btn-stop" disabled>Stop</button>
-        </div>
-
-        <div class="control-group">
-          <button id="btn-open-file">Open WAV File</button>
-          <button id="btn-download-model" style="display:none">Download Model</button>
-        </div>
-
-        <div class="control-group transcription-toggle-group">
-          <label class="toggle-label" for="transcription-toggle">
-            <input type="checkbox" id="transcription-toggle" checked />
-            <span class="toggle-track">
-              <span class="toggle-thumb"></span>
-            </span>
-            <span class="toggle-text">Transcription</span>
-          </label>
-        </div>
-      </section>
-
       <!-- Visualizations -->
       <section id="visualizations">
         <div class="visualization-container">
@@ -81,7 +54,59 @@
         </div>
       </section>
 
-      <!-- Transcription Output -->
+      <!-- Input Selection Controls -->
+      <section id="controls">
+        <div class="device-controls">
+          <div class="device-field">
+            <div class="device-field-header">
+              <label for="device-select">Primary:</label>
+            </div>
+            <select id="device-select">
+              <option value="">Loading devices...</option>
+            </select>
+          </div>
+          <div class="device-field">
+            <div class="device-field-header">
+              <label for="device-select-2">Secondary:</label>
+            </div>
+            <select id="device-select-2">
+              <option value="">Loading devices...</option>
+            </select>
+          </div>
+        </div>
+        <div id="controls-action-row">
+          <div id="action-buttons">
+            <button id="btn-capture" disabled>Record</button>
+            <button id="btn-open-file">Open WAV File</button>
+            <button id="btn-download-model" style="display:none">Download Model</button>
+          </div>
+          <div class="toggles-group">
+            <label class="toggle-label" for="transcription-toggle">
+              <input type="checkbox" id="transcription-toggle" checked />
+              <span class="toggle-track">
+                <span class="toggle-thumb"></span>
+              </span>
+              <span class="toggle-text">Transcription</span>
+            </label>
+            <label class="toggle-label" for="auto-transcription-toggle">
+              <input type="checkbox" id="auto-transcription-toggle" />
+              <span class="toggle-track">
+                <span class="toggle-thumb"></span>
+              </span>
+              <span class="toggle-text">Auto Transcription</span>
+            </label>
+            <label class="toggle-label" for="aec-toggle">
+              <input type="checkbox" id="aec-toggle" />
+              <span class="toggle-track">
+                <span class="toggle-thumb"></span>
+              </span>
+              <span class="toggle-text">Echo Cancel</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- Transcription output -->
       <section id="transcription">
         <h3>Transcription</h3>
         <div id="transcription-output">
