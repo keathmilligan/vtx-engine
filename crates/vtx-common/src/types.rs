@@ -1,6 +1,9 @@
 //! Shared types for vtx-engine audio capture, processing, and transcription.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 
 // =============================================================================
 // Audio Types
@@ -30,6 +33,17 @@ pub enum RecordingMode {
     EchoCancel,
 }
 
+/// Transcription mode - determines how speech segment boundaries are identified.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionMode {
+    /// VAD-triggered - speech detection determines segment boundaries
+    #[default]
+    Automatic,
+    /// Manual key-controlled - PTT press/release determines segment boundaries
+    PushToTalk,
+}
+
 /// Information about an audio device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -50,6 +64,369 @@ pub struct AudioData {
     pub channels: u16,
     /// Sample rate in Hz
     pub sample_rate: u32,
+}
+
+// =============================================================================
+// Hotkey Types
+// =============================================================================
+
+/// Platform-independent key codes for push-to-talk hotkey configuration.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyCode {
+    // === Modifier Keys ===
+    RightAlt,
+    LeftAlt,
+    RightControl,
+    LeftControl,
+    #[default]
+    RightShift,
+    LeftShift,
+    CapsLock,
+    LeftMeta,
+    RightMeta,
+
+    // === Function Keys ===
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    F13,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F20,
+    F21,
+    F22,
+    F23,
+    F24,
+
+    // === Letter Keys ===
+    KeyA,
+    KeyB,
+    KeyC,
+    KeyD,
+    KeyE,
+    KeyF,
+    KeyG,
+    KeyH,
+    KeyI,
+    KeyJ,
+    KeyK,
+    KeyL,
+    KeyM,
+    KeyN,
+    KeyO,
+    KeyP,
+    KeyQ,
+    KeyR,
+    KeyS,
+    KeyT,
+    KeyU,
+    KeyV,
+    KeyW,
+    KeyX,
+    KeyY,
+    KeyZ,
+
+    // === Digit Keys ===
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+
+    // === Navigation Keys ===
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
+
+    // === Special Keys ===
+    Escape,
+    Tab,
+    Space,
+    Enter,
+    Backspace,
+    PrintScreen,
+    ScrollLock,
+    Pause,
+
+    // === Punctuation / Symbol Keys ===
+    Minus,
+    Equal,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Semicolon,
+    Quote,
+    Backquote,
+    Comma,
+    Period,
+    Slash,
+
+    // === Numpad Keys ===
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadMultiply,
+    NumpadAdd,
+    NumpadSubtract,
+    NumpadDecimal,
+    NumpadDivide,
+    NumLock,
+}
+
+impl KeyCode {
+    /// Get a human-readable display name for the key.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            KeyCode::RightAlt => "Right Alt",
+            KeyCode::LeftAlt => "Left Alt",
+            KeyCode::RightControl => "Right Ctrl",
+            KeyCode::LeftControl => "Left Ctrl",
+            KeyCode::RightShift => "Right Shift",
+            KeyCode::LeftShift => "Left Shift",
+            KeyCode::CapsLock => "Caps Lock",
+            KeyCode::LeftMeta => "Left Win",
+            KeyCode::RightMeta => "Right Win",
+            KeyCode::F1 => "F1",
+            KeyCode::F2 => "F2",
+            KeyCode::F3 => "F3",
+            KeyCode::F4 => "F4",
+            KeyCode::F5 => "F5",
+            KeyCode::F6 => "F6",
+            KeyCode::F7 => "F7",
+            KeyCode::F8 => "F8",
+            KeyCode::F9 => "F9",
+            KeyCode::F10 => "F10",
+            KeyCode::F11 => "F11",
+            KeyCode::F12 => "F12",
+            KeyCode::F13 => "F13",
+            KeyCode::F14 => "F14",
+            KeyCode::F15 => "F15",
+            KeyCode::F16 => "F16",
+            KeyCode::F17 => "F17",
+            KeyCode::F18 => "F18",
+            KeyCode::F19 => "F19",
+            KeyCode::F20 => "F20",
+            KeyCode::F21 => "F21",
+            KeyCode::F22 => "F22",
+            KeyCode::F23 => "F23",
+            KeyCode::F24 => "F24",
+            KeyCode::KeyA => "A",
+            KeyCode::KeyB => "B",
+            KeyCode::KeyC => "C",
+            KeyCode::KeyD => "D",
+            KeyCode::KeyE => "E",
+            KeyCode::KeyF => "F",
+            KeyCode::KeyG => "G",
+            KeyCode::KeyH => "H",
+            KeyCode::KeyI => "I",
+            KeyCode::KeyJ => "J",
+            KeyCode::KeyK => "K",
+            KeyCode::KeyL => "L",
+            KeyCode::KeyM => "M",
+            KeyCode::KeyN => "N",
+            KeyCode::KeyO => "O",
+            KeyCode::KeyP => "P",
+            KeyCode::KeyQ => "Q",
+            KeyCode::KeyR => "R",
+            KeyCode::KeyS => "S",
+            KeyCode::KeyT => "T",
+            KeyCode::KeyU => "U",
+            KeyCode::KeyV => "V",
+            KeyCode::KeyW => "W",
+            KeyCode::KeyX => "X",
+            KeyCode::KeyY => "Y",
+            KeyCode::KeyZ => "Z",
+            KeyCode::Digit0 => "0",
+            KeyCode::Digit1 => "1",
+            KeyCode::Digit2 => "2",
+            KeyCode::Digit3 => "3",
+            KeyCode::Digit4 => "4",
+            KeyCode::Digit5 => "5",
+            KeyCode::Digit6 => "6",
+            KeyCode::Digit7 => "7",
+            KeyCode::Digit8 => "8",
+            KeyCode::Digit9 => "9",
+            KeyCode::ArrowUp => "Up",
+            KeyCode::ArrowDown => "Down",
+            KeyCode::ArrowLeft => "Left",
+            KeyCode::ArrowRight => "Right",
+            KeyCode::Home => "Home",
+            KeyCode::End => "End",
+            KeyCode::PageUp => "Page Up",
+            KeyCode::PageDown => "Page Down",
+            KeyCode::Insert => "Insert",
+            KeyCode::Delete => "Delete",
+            KeyCode::Escape => "Esc",
+            KeyCode::Tab => "Tab",
+            KeyCode::Space => "Space",
+            KeyCode::Enter => "Enter",
+            KeyCode::Backspace => "Backspace",
+            KeyCode::PrintScreen => "Print Screen",
+            KeyCode::ScrollLock => "Scroll Lock",
+            KeyCode::Pause => "Pause",
+            KeyCode::Minus => "-",
+            KeyCode::Equal => "=",
+            KeyCode::BracketLeft => "[",
+            KeyCode::BracketRight => "]",
+            KeyCode::Backslash => "\\",
+            KeyCode::Semicolon => ";",
+            KeyCode::Quote => "'",
+            KeyCode::Backquote => "`",
+            KeyCode::Comma => ",",
+            KeyCode::Period => ".",
+            KeyCode::Slash => "/",
+            KeyCode::Numpad0 => "Num 0",
+            KeyCode::Numpad1 => "Num 1",
+            KeyCode::Numpad2 => "Num 2",
+            KeyCode::Numpad3 => "Num 3",
+            KeyCode::Numpad4 => "Num 4",
+            KeyCode::Numpad5 => "Num 5",
+            KeyCode::Numpad6 => "Num 6",
+            KeyCode::Numpad7 => "Num 7",
+            KeyCode::Numpad8 => "Num 8",
+            KeyCode::Numpad9 => "Num 9",
+            KeyCode::NumpadMultiply => "Num *",
+            KeyCode::NumpadAdd => "Num +",
+            KeyCode::NumpadSubtract => "Num -",
+            KeyCode::NumpadDecimal => "Num .",
+            KeyCode::NumpadDivide => "Num /",
+            KeyCode::NumLock => "Num Lock",
+        }
+    }
+
+    /// Whether this key is a modifier key.
+    pub fn is_modifier(&self) -> bool {
+        matches!(
+            self,
+            KeyCode::LeftControl
+                | KeyCode::RightControl
+                | KeyCode::LeftAlt
+                | KeyCode::RightAlt
+                | KeyCode::LeftShift
+                | KeyCode::RightShift
+                | KeyCode::LeftMeta
+                | KeyCode::RightMeta
+        )
+    }
+}
+
+/// A set of keys that must all be held simultaneously to trigger PTT.
+///
+/// Order of keys does not matter for equality — two combinations with the same
+/// keys in different order are considered equal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotkeyCombination {
+    /// One or more keys that must be held together.
+    pub keys: Vec<KeyCode>,
+}
+
+impl HotkeyCombination {
+    /// Create a new combination from a list of keys. Duplicates are removed and
+    /// keys are sorted for consistent representation.
+    pub fn new(keys: Vec<KeyCode>) -> Self {
+        let mut unique: Vec<KeyCode> = keys
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        unique.sort_by_key(|k| format!("{:?}", k));
+        Self { keys: unique }
+    }
+
+    /// Create a single-key combination.
+    pub fn single(key: KeyCode) -> Self {
+        Self { keys: vec![key] }
+    }
+
+    /// Display the combination in human-readable format.
+    /// Modifiers are listed first, then other keys, joined by " + ".
+    pub fn display(&self) -> String {
+        let mut modifiers: Vec<&KeyCode> = Vec::new();
+        let mut others: Vec<&KeyCode> = Vec::new();
+        for k in &self.keys {
+            if k.is_modifier() {
+                modifiers.push(k);
+            } else {
+                others.push(k);
+            }
+        }
+        modifiers.sort_by_key(|k| format!("{:?}", k));
+        others.sort_by_key(|k| format!("{:?}", k));
+        let all: Vec<&str> = modifiers
+            .iter()
+            .chain(others.iter())
+            .map(|k| k.display_name())
+            .collect();
+        all.join(" + ")
+    }
+
+    /// Check whether all keys in this combination are in the given pressed set.
+    pub fn is_subset_of(&self, pressed: &HashSet<KeyCode>) -> bool {
+        self.keys.iter().all(|k| pressed.contains(k))
+    }
+}
+
+impl PartialEq for HotkeyCombination {
+    fn eq(&self, other: &Self) -> bool {
+        let a: HashSet<_> = self.keys.iter().collect();
+        let b: HashSet<_> = other.keys.iter().collect();
+        a == b
+    }
+}
+
+impl Eq for HotkeyCombination {}
+
+impl Hash for HotkeyCombination {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut sorted: Vec<_> = self.keys.clone();
+        sorted.sort_by_key(|k| format!("{:?}", k));
+        sorted.hash(state);
+    }
+}
+
+impl fmt::Display for HotkeyCombination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display())
+    }
+}
+
+impl Default for HotkeyCombination {
+    fn default() -> Self {
+        Self::single(KeyCode::default())
+    }
 }
 
 // =============================================================================
@@ -106,14 +483,34 @@ pub struct SpeechMetrics {
 /// Transcription result for a speech segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionResult {
+    /// Unique history entry ID (populated when stored in history)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Transcribed text
     pub text: String,
+    /// ISO 8601 UTC timestamp of when transcription completed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
     /// Duration of the audio segment in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Path to the saved audio file (if saved)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_path: Option<String>,
+}
+
+/// A single entry in the transcription history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    /// Unique identifier (UUID v4)
+    pub id: String,
+    /// Transcribed text
+    pub text: String,
+    /// ISO 8601 UTC timestamp of when transcription occurred
+    pub timestamp: String,
+    /// Path to the cached WAV file, if it still exists
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wav_path: Option<String>,
 }
 
 /// Status of the Whisper model.

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Shared types for the vtx-engine voice processing library"
+keywords = ["audio", "speech", "transcription", "voice", "whisper"]
+categories = ["multimedia::audio", "api-bindings"]
+repository = "https://github.com/user/vtx-engine"
+homepage = "https://github.com/user/vtx-engine"
+documentation = "https://docs.rs/vtx-common"
 
 [dependencies]
 serde = { workspace = true }

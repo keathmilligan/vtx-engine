@@ -9,69 +9,12 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use vtx_common::*;
-use vtx_engine::{AudioEngine, EngineConfig, EventHandler};
+use vtx_engine::{AudioEngine, EngineBuilder, PushToTalkController};
 
 /// Application state shared across Tauri commands.
 struct AppState {
     engine: Arc<Mutex<Option<AudioEngine>>>,
-}
-
-/// Event handler that forwards engine events to the Tauri frontend.
-struct TauriEventHandler {
-    app_handle: tauri::AppHandle,
-}
-
-impl EventHandler for TauriEventHandler {
-    fn on_event(&self, event: EngineEvent) {
-        match &event {
-            EngineEvent::VisualizationData(data) => {
-                let _ = self.app_handle.emit("visualization-data", data);
-            }
-            EngineEvent::TranscriptionComplete(result) => {
-                let _ = self.app_handle.emit("transcription-complete", result);
-            }
-            EngineEvent::SpeechStarted => {
-                let _ = self.app_handle.emit("speech-started", ());
-            }
-            EngineEvent::SpeechEnded { duration_ms } => {
-                let _ = self.app_handle.emit("speech-ended", duration_ms);
-            }
-            EngineEvent::CaptureStateChanged { capturing, error } => {
-                #[derive(serde::Serialize, Clone)]
-                struct CaptureState {
-                    capturing: bool,
-                    error: Option<String>,
-                }
-                let _ = self.app_handle.emit(
-                    "capture-state-changed",
-                    CaptureState {
-                        capturing: *capturing,
-                        error: error.clone(),
-                    },
-                );
-            }
-            EngineEvent::ModelDownloadProgress { percent } => {
-                let _ = self.app_handle.emit("model-download-progress", percent);
-            }
-            EngineEvent::ModelDownloadComplete { success } => {
-                let _ = self.app_handle.emit("model-download-complete", success);
-            }
-            EngineEvent::AudioLevelUpdate { device_id, level_db } => {
-                #[derive(serde::Serialize, Clone)]
-                struct LevelUpdate {
-                    device_id: String,
-                    level_db: f32,
-                }
-                let _ = self.app_handle.emit(
-                    "audio-level-update",
-                    LevelUpdate {
-                        device_id: device_id.clone(),
-                        level_db: *level_db,
-                    },
-                );
-            }
-        }
-    }
+    ptt: Arc<Mutex<Option<PushToTalkController>>>,
 }
 
 // =============================================================================
@@ -97,11 +40,11 @@ async fn start_capture(
     state: tauri::State<'_, AppState>,
     source_id: String,
     source2_id: Option<String>,
-    aec_enabled: Option<bool>,
+    recording_mode: Option<String>,
 ) -> Result<(), String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.set_aec_enabled(aec_enabled.unwrap_or(false));
+    let _ = recording_mode; // Mode is set at construction; acknowledged here for API compat
     engine.start_capture(Some(source_id), source2_id).await
 }
 
@@ -151,7 +94,7 @@ async fn get_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus, S
 }
 
 #[tauri::command]
-async fn get_gpu_status(state: tauri::State<'_, AppState>) -> Result<vtx_common::GpuStatus, String> {
+async fn get_gpu_status(state: tauri::State<'_, AppState>) -> Result<GpuStatus, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     engine.check_gpu_status()
@@ -176,29 +119,27 @@ async fn is_transcription_enabled(state: tauri::State<'_, AppState>) -> Result<b
 }
 
 #[tauri::command]
-async fn set_ptt_mode(
-    state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
-    let engine_lock = state.engine.lock().await;
-    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.set_ptt_mode(enabled);
+async fn ptt_press(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let ptt_lock = state.ptt.lock().await;
+    if let Some(ref ptt) = *ptt_lock {
+        ptt.press();
+    }
     Ok(())
 }
 
 #[tauri::command]
-async fn is_ptt_mode(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let engine_lock = state.engine.lock().await;
-    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    Ok(engine.is_ptt_mode())
+async fn ptt_release(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let ptt_lock = state.ptt.lock().await;
+    if let Some(ref ptt) = *ptt_lock {
+        ptt.release();
+    }
+    Ok(())
 }
 
 #[tauri::command]
-async fn finalize_segment(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let engine_lock = state.engine.lock().await;
-    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.finalize_segment();
-    Ok(())
+async fn is_ptt_active(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let ptt_lock = state.ptt.lock().await;
+    Ok(ptt_lock.as_ref().map(|p| p.is_active()).unwrap_or(false))
 }
 
 // =============================================================================
@@ -207,7 +148,6 @@ async fn finalize_segment(state: tauri::State<'_, AppState>) -> Result<(), Strin
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -223,22 +163,62 @@ pub fn run() {
         .setup(|app| {
             let app_handle = app.handle().clone();
 
-            // Initialize engine in background
             let state = AppState {
                 engine: Arc::new(Mutex::new(None)),
+                ptt: Arc::new(Mutex::new(None)),
             };
 
             let engine_arc = state.engine.clone();
+            let ptt_arc = state.ptt.clone();
 
-            // Spawn engine initialization
             tauri::async_runtime::spawn(async move {
-                let handler = TauriEventHandler {
-                    app_handle: app_handle.clone(),
-                };
-
-                match AudioEngine::new(EngineConfig::default(), handler).await {
-                    Ok(engine) => {
+                match EngineBuilder::new().build().await {
+                    Ok((engine, rx)) => {
                         info!("Audio engine initialized successfully");
+
+                        // Spawn event forwarding task using EventHandlerAdapter pattern
+                        let ah = app_handle.clone();
+                        vtx_engine::EventHandlerAdapter::new(rx, move |event| {
+                            match &event {
+                                EngineEvent::VisualizationData(data) => {
+                                    let _ = ah.emit("visualization-data", data);
+                                }
+                                EngineEvent::TranscriptionComplete(result) => {
+                                    let _ = ah.emit("transcription-complete", result);
+                                }
+                                EngineEvent::SpeechStarted => {
+                                    let _ = ah.emit("speech-started", ());
+                                }
+                                EngineEvent::SpeechEnded { duration_ms } => {
+                                    let _ = ah.emit("speech-ended", duration_ms);
+                                }
+                                EngineEvent::CaptureStateChanged { capturing, error } => {
+                                    #[derive(serde::Serialize, Clone)]
+                                    struct CaptureState { capturing: bool, error: Option<String> }
+                                    let _ = ah.emit("capture-state-changed", CaptureState {
+                                        capturing: *capturing,
+                                        error: error.clone(),
+                                    });
+                                }
+                                EngineEvent::ModelDownloadProgress { percent } => {
+                                    let _ = ah.emit("model-download-progress", percent);
+                                }
+                                EngineEvent::ModelDownloadComplete { success } => {
+                                    let _ = ah.emit("model-download-complete", success);
+                                }
+                                EngineEvent::AudioLevelUpdate { device_id, level_db } => {
+                                    #[derive(serde::Serialize, Clone)]
+                                    struct LevelUpdate { device_id: String, level_db: f32 }
+                                    let _ = ah.emit("audio-level-update", LevelUpdate {
+                                        device_id: device_id.clone(),
+                                        level_db: *level_db,
+                                    });
+                                }
+                            }
+                        }).spawn();
+
+                        let ptt = engine.ptt_controller();
+                        *ptt_arc.lock().await = Some(ptt);
                         *engine_arc.lock().await = Some(engine);
                     }
                     Err(e) => {
@@ -248,7 +228,6 @@ pub fn run() {
             });
 
             app.manage(state);
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -264,9 +243,9 @@ pub fn run() {
             get_gpu_status,
             set_transcription_enabled,
             is_transcription_enabled,
-            set_ptt_mode,
-            is_ptt_mode,
-            finalize_segment,
+            ptt_press,
+            ptt_release,
+            is_ptt_active,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");
