@@ -5,6 +5,8 @@
 //! On macOS: libwhisper.dylib is downloaded from GitHub releases  
 //! On Linux: libwhisper.so is built from source using CMake
 
+#[cfg(windows)]
+use libloading::os::windows::Library as WinLibrary;
 use libloading::Library;
 use std::ffi::{c_char, c_float, c_int, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -274,10 +276,26 @@ unsafe impl Sync for GgmlLibrary {}
 
 #[cfg(not(target_os = "macos"))]
 impl GgmlLibrary {
-    /// Load the ggml library from the given path
+    /// Load the ggml library from the given path.
+    ///
+    /// On Windows, loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+    /// LOAD_LIBRARY_SEARCH_DEFAULT_DIRS so that the DLL's own directory is
+    /// searched for its dependencies (e.g. ggml-base.dll, ggml-cpu.dll) and
+    /// directories registered via AddDllDirectory are also consulted.
     fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         unsafe {
-            let lib = Library::new(path.as_ref())
+            #[cfg(windows)]
+            let lib: Library = {
+                // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (0x100): search the directory
+                // containing the DLL being loaded for its dependencies.
+                // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS (0x1000): also search
+                // AddDllDirectory list + application directory + System32.
+                WinLibrary::load_with_flags(path.as_ref(), 0x100 | 0x1000)
+                    .map(|l| l.into())
+                    .map_err(|e| format!("Failed to load ggml library: {}", e))?
+            };
+            #[cfg(not(windows))]
+            let lib: Library = Library::new(path.as_ref())
                 .map_err(|e| format!("Failed to load ggml library: {}", e))?;
 
             // Load ggml_backend_load_all_from_path - this function loads all backend plugins (CUDA, etc.)
@@ -398,10 +416,23 @@ unsafe impl Send for WhisperLibrary {}
 unsafe impl Sync for WhisperLibrary {}
 
 impl WhisperLibrary {
-    /// Load the whisper library from the given path
+    /// Load the whisper library from the given path.
+    ///
+    /// On Windows, loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+    /// LOAD_LIBRARY_SEARCH_DEFAULT_DIRS so that the DLL's own directory is
+    /// searched for its dependencies (ggml*.dll) and directories registered
+    /// via AddDllDirectory are also consulted.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         unsafe {
-            let lib = Library::new(path.as_ref())
+            #[cfg(windows)]
+            let lib: Library = {
+                // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (0x100) | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS (0x1000)
+                WinLibrary::load_with_flags(path.as_ref(), 0x100 | 0x1000)
+                    .map(|l| l.into())
+                    .map_err(|e| format!("Failed to load whisper library: {}", e))?
+            };
+            #[cfg(not(windows))]
+            let lib: Library = Library::new(path.as_ref())
                 .map_err(|e| format!("Failed to load whisper library: {}", e))?;
 
             // Load all required symbols - dereference immediately to get raw fn pointers
@@ -458,28 +489,44 @@ impl WhisperLibrary {
     }
 }
 
-/// On Windows, add a directory to the DLL search path.
-/// This is necessary for whisper.dll to find its dependencies (ggml-cuda.dll, CUDA runtime, etc.)
-/// when the service is run from a different working directory.
+/// On Windows, add a directory to the DLL search path using AddDllDirectory.
+///
+/// AddDllDirectory adds the path to the process-wide list without replacing the
+/// standard search path (unlike SetDllDirectoryW, which replaces it and breaks
+/// resolution of system DLLs like vcruntime140.dll).
+///
+/// The cookie returned by AddDllDirectory is intentionally leaked — the directory
+/// must remain registered for the lifetime of the process so that DLLs loaded
+/// later (e.g. ggml-cuda.dll loaded by ggml_backend_load_all_from_path) can
+/// still find their transitive dependencies.
 #[cfg(windows)]
 fn add_dll_directory(dir: &Path) {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn SetDllDirectoryW(path: *const u16) -> i32;
+        fn AddDllDirectory(path: *const u16) -> *mut std::ffi::c_void;
     }
 
+    // AddDllDirectory does not accept \\?\ long-path prefixes — strip it if present.
+    let dir_str = dir.to_string_lossy();
+    let stripped: &str = dir_str.strip_prefix(r"\\?\").unwrap_or(&dir_str);
+    let stripped_path = std::path::Path::new(stripped);
+
     // Convert path to wide string (null-terminated UTF-16)
-    let wide: Vec<u16> = dir
+    let wide: Vec<u16> = stripped_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
-    let result = unsafe { SetDllDirectoryW(wide.as_ptr()) };
-    if result != 0 {
+    let cookie = unsafe { AddDllDirectory(wide.as_ptr()) };
+    if !cookie.is_null() {
         tracing::debug!("Added DLL search directory: {}", dir.display());
+        // The cookie is a raw pointer (Copy type) — the directory registration
+        // persists until RemoveDllDirectory is called or the process exits.
+        // We intentionally never remove it, so no cleanup is needed.
+        let _ = cookie;
     } else {
         tracing::warn!("Failed to add DLL search directory: {}", dir.display());
     }
@@ -677,6 +724,14 @@ fn resource_dir_paths(lib_name: &str) -> Vec<PathBuf> {
     if let Ok(resource_dir) = std::env::var("VTX_RESOURCE_DIR") {
         if !resource_dir.is_empty() {
             let base = PathBuf::from(resource_dir);
+            // Windows ships CUDA and CPU variants in separate subdirs.
+            // Try CUDA first (GPU acceleration), then CPU fallback.
+            #[cfg(windows)]
+            {
+                paths.push(base.join("binaries").join("cuda").join(lib_name));
+                paths.push(base.join("binaries").join("cpu").join(lib_name));
+            }
+            // Also check legacy flat layout for backwards compatibility
             paths.push(base.join(lib_name));
             paths.push(base.join("binaries").join(lib_name));
         }

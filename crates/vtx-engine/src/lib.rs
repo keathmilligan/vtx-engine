@@ -492,7 +492,10 @@ impl AudioEngine {
         transcription::whisper_ffi::init_library()?;
         let system_info = transcription::whisper_ffi::get_system_info()?;
         Ok(GpuStatus {
-            cuda_available: system_info.contains("CUDA"),
+            // "CUDA : ARCHS = ..." is present when a CUDA backend is active.
+            // A plain "CUDA" substring can appear in non-GPU info strings, so
+            // match the more specific form used by flowstt for consistency.
+            cuda_available: system_info.contains("CUDA : ARCHS"),
             metal_available: system_info.contains("METAL = 1"),
             system_info,
         })
