@@ -16,8 +16,8 @@ This guide covers the primary integration patterns for vtx-engine:
 ```toml
 # Cargo.toml
 [dependencies]
-vtx-engine = { path = "../vtx-engine" }   # or version = "0.2.0" once published
-vtx-common = { path = "../vtx-common" }
+vtx-engine = "0.1"
+vtx-common = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -426,3 +426,56 @@ All fields can be set via `EngineBuilder` setters or by constructing `EngineConf
 | `transcription_queue_capacity` | `usize` | `8` | Maximum segments queued awaiting transcription |
 | `viz_frame_interval_ms` | `u64` | `16` | Visualization frame interval (~60 fps) |
 | `word_break_segmentation_enabled` | `bool` | `true` | Split segments at word-break pauses; set `false` for long-form transcription |
+
+---
+
+## Local Development Against an Unpublished Version
+
+When you need to make changes to vtx-engine and test them in your application
+simultaneously — without publishing to crates.io — use Cargo's
+[`[patch.crates-io]`](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html)
+mechanism.
+
+In your **application's** root `Cargo.toml`, add a `[patch.crates-io]` table
+that points both crates at their local paths:
+
+```toml
+# my-app/Cargo.toml
+
+[dependencies]
+vtx-engine = "0.1"
+vtx-common = "0.1"
+
+# --- Local development override ---
+# Point at a local checkout of vtx-engine while iterating on the library.
+# Remove this section before committing or cutting a release.
+[patch.crates-io]
+vtx-engine = { path = "../vtx-engine/crates/vtx-engine" }
+vtx-common  = { path = "../vtx-engine/crates/vtx-common" }
+```
+
+Adjust the relative paths so they resolve correctly from your application's
+workspace root. `[patch.crates-io]` must be declared at the workspace root
+(the `Cargo.toml` that contains `[workspace]`), not in an individual crate.
+
+### How it works
+
+Cargo replaces the crates.io versions of `vtx-engine` and `vtx-common` with the
+local source tree for every build in the workspace. The version declared in
+`[dependencies]` is still checked for compatibility with the local crate's
+`[package] version`, so keep them in sync. No other changes to your code are
+required — `use vtx_engine::...` imports continue to work unchanged.
+
+### Workflow
+
+```
+my-app/                         vtx-engine/
+  Cargo.toml  ──[patch]──▶        crates/vtx-engine/
+  src/                            crates/vtx-common/
+```
+
+1. Edit vtx-engine source normally.
+2. Run `cargo build` (or `cargo tauri build`) in your application — Cargo picks
+   up the local changes automatically.
+3. When you are done, remove the `[patch.crates-io]` section and bump the
+   version in `[dependencies]` to the newly published release.
