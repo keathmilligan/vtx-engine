@@ -477,8 +477,132 @@ pub struct SpeechMetrics {
 }
 
 // =============================================================================
+// Whisper Model Types
+// =============================================================================
+
+/// Whisper model variant to use for transcription.
+///
+/// Variants are listed roughly in order of size (smallest to largest).
+/// En-suffixed variants are English-only and are generally faster for
+/// English-language audio.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhisperModel {
+    /// ~39 MB — fastest, English-only
+    TinyEn,
+    /// ~39 MB — fastest, multilingual
+    Tiny,
+    /// ~74 MB — fast, English-only
+    #[default]
+    BaseEn,
+    /// ~74 MB — fast, multilingual
+    Base,
+    /// ~244 MB — good balance, English-only
+    SmallEn,
+    /// ~244 MB — good balance, multilingual
+    Small,
+    /// ~769 MB — high accuracy, English-only
+    MediumEn,
+    /// ~769 MB — high accuracy, multilingual
+    Medium,
+    /// ~1.5 GB — best accuracy, multilingual
+    LargeV3,
+}
+
+impl WhisperModel {
+    /// Return the canonical whisper.cpp filename slug for this model.
+    ///
+    /// The file name on disk is `ggml-{slug}.bin`.
+    pub fn slug(self) -> &'static str {
+        match self {
+            WhisperModel::TinyEn => "tiny.en",
+            WhisperModel::Tiny => "tiny",
+            WhisperModel::BaseEn => "base.en",
+            WhisperModel::Base => "base",
+            WhisperModel::SmallEn => "small.en",
+            WhisperModel::Small => "small",
+            WhisperModel::MediumEn => "medium.en",
+            WhisperModel::Medium => "medium",
+            WhisperModel::LargeV3 => "large-v3",
+        }
+    }
+
+    /// Return the Hugging Face download URL for this model.
+    pub fn download_url(self) -> String {
+        format!(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
+            self.slug()
+        )
+    }
+
+    /// Return all variants in ascending order of model size.
+    pub fn all_in_size_order() -> &'static [WhisperModel] {
+        &[
+            WhisperModel::TinyEn,
+            WhisperModel::Tiny,
+            WhisperModel::BaseEn,
+            WhisperModel::Base,
+            WhisperModel::SmallEn,
+            WhisperModel::Small,
+            WhisperModel::MediumEn,
+            WhisperModel::Medium,
+            WhisperModel::LargeV3,
+        ]
+    }
+}
+
+// =============================================================================
+// Transcription Profile
+// =============================================================================
+
+/// Preset configuration profile for the audio engine.
+///
+/// Use [`EngineBuilder::with_profile`](https://docs.rs/vtx-engine) to apply
+/// a profile before calling individual setters.
+///
+/// - `Dictation` — short-burst real-time microphone dictation (FlowSTT-style).
+/// - `Transcription` — long-form post-capture transcription (OmniRec-style).
+/// - `Custom` — no presets applied; all `EngineConfig` fields stay at `Default`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionProfile {
+    /// Short-burst VAD-driven dictation.
+    ///
+    /// Presets: `segment_max_duration_ms = 4_000`, `word_break_segmentation_enabled = true`,
+    /// `segment_word_break_grace_ms = 750`, `model = WhisperModel::BaseEn`.
+    #[default]
+    Dictation,
+    /// Long-form timestamped transcription.
+    ///
+    /// Presets: `segment_max_duration_ms = 15_000`, `word_break_segmentation_enabled = false`,
+    /// `model = WhisperModel::MediumEn`.
+    Transcription,
+    /// No presets — all `EngineConfig` fields remain at their `Default` values.
+    Custom,
+}
+
+// =============================================================================
 // Transcription Types
 // =============================================================================
+
+/// A single timestamped segment produced by stream or file transcription.
+///
+/// Emitted as `EngineEvent::TranscriptionSegment` during `transcribe_audio_stream`
+/// and `transcribe_audio_file` sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSegment {
+    /// Unique segment identifier (UUID v4 formatted string)
+    pub id: String,
+    /// Transcribed text for this segment
+    pub text: String,
+    /// Milliseconds from session start to the beginning of this segment
+    pub timestamp_offset_ms: u64,
+    /// Duration of this audio segment in milliseconds
+    pub duration_ms: u64,
+    /// Path to the saved audio file for this segment, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_path: Option<String>,
+}
 
 /// Transcription result for a speech segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,6 +621,12 @@ pub struct TranscriptionResult {
     /// Path to the saved audio file (if saved)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_path: Option<String>,
+    /// Milliseconds from session/recording start to this segment.
+    ///
+    /// `None` for real-time live-capture dictation sessions.
+    /// `Some(ms)` for file-based transcription via `transcribe_audio_file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_offset_ms: Option<u64>,
 }
 
 /// A single entry in the transcription history.
@@ -601,4 +731,7 @@ pub enum EngineEvent {
         /// RMS audio level in dB
         level_db: f32,
     },
+    /// A single timestamped transcription segment from `transcribe_audio_stream`
+    /// or `transcribe_audio_file`. NOT emitted during live-capture dictation.
+    TranscriptionSegment(TranscriptionSegment),
 }

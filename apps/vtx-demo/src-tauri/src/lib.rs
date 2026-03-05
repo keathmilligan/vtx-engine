@@ -80,10 +80,10 @@ async fn download_model(state: tauri::State<'_, AppState>) -> Result<(), String>
 async fn transcribe_file(
     state: tauri::State<'_, AppState>,
     path: String,
-) -> Result<TranscriptionResult, String> {
+) -> Result<Vec<vtx_common::TranscriptionSegment>, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.transcribe_file(path).await
+    engine.transcribe_audio_file(path).await
 }
 
 #[tauri::command]
@@ -213,6 +213,9 @@ pub fn run() {
                                         device_id: device_id.clone(),
                                         level_db: *level_db,
                                     });
+                                }
+                                EngineEvent::TranscriptionSegment(seg) => {
+                                    let _ = ah.emit("transcription-segment", seg);
                                 }
                             }
                         }).spawn();

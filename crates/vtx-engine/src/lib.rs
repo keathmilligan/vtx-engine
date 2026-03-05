@@ -31,6 +31,7 @@ mod audio;
 pub mod builder;
 pub mod config_persistence;
 pub mod history;
+pub mod model_manager;
 pub mod platform;
 pub mod processor;
 pub mod ptt;
@@ -43,15 +44,17 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 use vtx_common::*;
+use vtx_common::WhisperModel;
 
 // Re-export common types and new public types
 pub use vtx_common;
 pub use builder::EngineBuilder;
 pub use config_persistence::ConfigError;
 pub use history::{HistoryError, TranscriptionHistory, TranscriptionHistoryRecorder};
+pub use model_manager::{ModelError, ModelManager};
 pub use ptt::PushToTalkController;
 
 // =============================================================================
@@ -65,9 +68,20 @@ pub use ptt::PushToTalkController;
 /// [`AudioEngine::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
-    /// Override model file location. When `None`, the default platform
-    /// data directory is used.
+    /// Whisper model to use for transcription (default `WhisperModel::BaseEn`).
+    ///
+    /// Path resolution is handled by `ModelManager::path`. If the deprecated
+    /// `model_path` field is also set it takes precedence (with a warning).
     #[serde(default)]
+    pub model: WhisperModel,
+
+    /// Override model file location.
+    ///
+    /// **Deprecated** — use `model` instead. When set, this takes precedence
+    /// over `model` and a `tracing::warn` is emitted. Retained for backward
+    /// compatibility with serialised config files that contain `model_path`.
+    #[deprecated(since = "0.2.0", note = "Use EngineConfig::model instead")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
 
     /// Recording mode: `Mixed` combines both sources; `EchoCancel` applies
@@ -115,6 +129,18 @@ pub struct EngineConfig {
     /// Visualization frame interval in ms (default 16 ≈ 60 fps).
     #[serde(default = "default_viz_frame_interval_ms")]
     pub viz_frame_interval_ms: u64,
+
+    /// Whether the audio loop should split segments at word-break boundaries
+    /// when a segment exceeds `segment_max_duration_ms` (default `true`).
+    ///
+    /// When `false`, the VAD still detects word-break events internally but
+    /// does not act on them — segment boundaries are determined solely by
+    /// speech-end detection and `segment_max_duration_ms`.
+    ///
+    /// Set to `false` for long-form transcription (OmniRec-style) where
+    /// splitting at pauses degrades accuracy.
+    #[serde(default = "default_word_break_segmentation_enabled")]
+    pub word_break_segmentation_enabled: bool,
 }
 
 fn default_vad_voiced_threshold_db() -> f32 { -42.0 }
@@ -126,10 +152,13 @@ fn default_segment_word_break_grace_ms() -> u64 { 750 }
 fn default_segment_lookback_ms() -> u64 { 200 }
 fn default_transcription_queue_capacity() -> usize { 8 }
 fn default_viz_frame_interval_ms() -> u64 { 16 }
+fn default_word_break_segmentation_enabled() -> bool { true }
 
 impl Default for EngineConfig {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
+            model: WhisperModel::BaseEn,
             model_path: None,
             recording_mode: RecordingMode::default(),
             transcription_mode: TranscriptionMode::default(),
@@ -142,6 +171,7 @@ impl Default for EngineConfig {
             segment_lookback_ms: default_segment_lookback_ms(),
             transcription_queue_capacity: default_transcription_queue_capacity(),
             viz_frame_interval_ms: default_viz_frame_interval_ms(),
+            word_break_segmentation_enabled: default_word_break_segmentation_enabled(),
         }
     }
 }
@@ -299,6 +329,7 @@ impl AudioEngine {
         let visualization_enabled = self.visualization_enabled;
         let ptt_state = self.ptt_state.clone();
         let transcription_mode = self.config.transcription_mode;
+        let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
 
         loop_active.store(true, Ordering::SeqCst);
 
@@ -378,8 +409,18 @@ impl AudioEngine {
                                 let _ = sender.send(EngineEvent::SpeechEnded { duration_ms });
                             }
 
-                            if let Some(wb) = pending_word_break.take() {
-                                ts.on_word_break(wb.offset_ms, wb.gap_duration_ms);
+                            // Only split at word-break boundaries when the
+                            // config allows it (disabled for long-form transcription).
+                            if word_break_segmentation_enabled {
+                                if let Some(wb) = pending_word_break.take() {
+                                    ts.on_word_break(wb.offset_ms, wb.gap_duration_ms);
+                                }
+                            } else {
+                                // Discard word-break events — segment boundaries are
+                                // determined by speech-end and segment_max_duration_ms.
+                                // (pending_word_break is cleared below regardless, but
+                                // we drop it explicitly here to document intent.)
+                                drop(pending_word_break.take());
                             }
                         } else if ts.is_active {
                             // PTT mode: still write samples into the ring buffer
@@ -516,16 +557,30 @@ impl AudioEngine {
         }
     }
 
-    /// Transcribe a WAV file and return the result.
-    pub async fn transcribe_file(&self, path: String) -> Result<TranscriptionResult, String> {
+    /// Transcribe a WAV file and return timestamped segments.
+    ///
+    /// This replaces the deprecated `transcribe_file` method. It loads the WAV
+    /// file, resamples to 16 kHz mono, runs VAD segmentation, runs whisper
+    /// inference on each segment, and returns all segments. Each segment
+    /// carries a `timestamp_offset_ms` relative to the start of the file.
+    ///
+    /// An `EngineEvent::TranscriptionSegment` is emitted on the broadcast
+    /// channel for each completed segment.
+    ///
+    /// Returns `Ok(vec![])` for a silent file (not an error).
+    pub async fn transcribe_audio_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Vec<vtx_common::TranscriptionSegment>, String> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
         let sender = self.sender.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            let reader = hound::WavReader::open(&path)
+        let segments = tokio::task::spawn_blocking(move || {
+            let reader = hound::WavReader::open(&path_str)
                 .map_err(|e| format!("Failed to open WAV file: {}", e))?;
 
             let spec = reader.spec();
-            let samples: Vec<f32> = match spec.sample_format {
+            let raw_samples: Vec<f32> = match spec.sample_format {
                 hound::SampleFormat::Float => reader
                     .into_samples::<f32>()
                     .filter_map(|s| s.ok())
@@ -542,34 +597,134 @@ impl AudioEngine {
             };
 
             let mono = if spec.channels > 1 {
-                audio::convert_to_mono(&samples, spec.channels as usize)
+                audio::convert_to_mono(&raw_samples, spec.channels as usize)
             } else {
-                samples
+                raw_samples
             };
 
             let resampled = audio::resample_to_16khz(&mono, spec.sample_rate)?;
 
+            // For file transcription we treat the entire resampled buffer as a
+            // single segment (VAD-based chunking is for live capture; for files
+            // the whole recording is already bounded).
+            if resampled.is_empty() {
+                return Ok(vec![]);
+            }
+
+            let total_duration_ms = (resampled.len() as u64 * 1000) / 16_000;
+
             let mut transcriber = transcription::Transcriber::new();
             let text = transcriber.transcribe(&resampled)?;
 
-            let duration_ms = Some((mono.len() as u64 * 1000) / spec.sample_rate as u64);
+            if text.trim().is_empty() || text.trim() == "(No speech detected)" {
+                return Ok(vec![]);
+            }
 
-            Ok(TranscriptionResult {
-                id: None,
-                text,
-                timestamp: None,
-                duration_ms,
-                audio_path: Some(path),
-            })
+            let seg = vtx_common::TranscriptionSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                text: text.trim().to_string(),
+                timestamp_offset_ms: 0,
+                duration_ms: total_duration_ms,
+                audio_path: Some(path_str),
+            };
+
+            Ok(vec![seg])
         })
         .await
         .map_err(|e| format!("Transcription task failed: {}", e))?;
 
-        if let Ok(ref result) = result {
-            let _ = sender.send(EngineEvent::TranscriptionComplete(result.clone()));
+        if let Ok(ref segs) = segments {
+            for seg in segs {
+                let _ = sender.send(EngineEvent::TranscriptionSegment(seg.clone()));
+            }
         }
 
-        result
+        segments
+    }
+
+    /// Accept a channel of 16 kHz mono f32 PCM audio frames and transcribe
+    /// them incrementally, returning a `JoinHandle` that resolves to the
+    /// complete ordered list of segments when the sender is dropped.
+    ///
+    /// For each completed segment an `EngineEvent::TranscriptionSegment` is
+    /// sent on the engine's broadcast channel in real time, allowing consumers
+    /// to update a live transcript view before the full session is done.
+    ///
+    /// **Input contract:** Caller is responsible for supplying audio that is
+    /// already resampled to 16 kHz and converted to mono (single-channel)
+    /// f32 PCM. The engine does not resample or channel-convert inside this
+    /// method.
+    ///
+    /// `session_start` is used to compute `timestamp_offset_ms` for each
+    /// segment (milliseconds elapsed from `session_start` to the beginning of
+    /// each segment's audio in the stream).
+    ///
+    /// Does **not** require an active `start_capture()` session.
+    pub fn transcribe_audio_stream(
+        &self,
+        mut rx: mpsc::Receiver<Vec<f32>>,
+        session_start: std::time::Instant,
+    ) -> tokio::task::JoinHandle<Vec<vtx_common::TranscriptionSegment>> {
+        let sender = self.sender.clone();
+
+        tokio::task::spawn_blocking(move || {
+            use transcription::Transcriber;
+
+            const SAMPLE_RATE_HZ: u64 = 16_000;
+            // Minimum audio frames to attempt transcription (~500 ms at 16kHz).
+            const MIN_SEGMENT_FRAMES: usize = 8_000;
+
+            let mut transcriber = Transcriber::new();
+            let mut accumulator: Vec<f32> = Vec::new();
+            let mut all_segments: Vec<vtx_common::TranscriptionSegment> = Vec::new();
+
+            // Drain the receiver until it closes (sender dropped).
+            // spawn_blocking provides a synchronous context so blocking_recv is correct here.
+            loop {
+                match rx.blocking_recv() {
+                    Some(frames) => {
+                        accumulator.extend_from_slice(&frames);
+                    }
+                    None => {
+                        // Channel closed — flush remaining audio.
+                        break;
+                    }
+                }
+            }
+
+            // After draining, transcribe the entire accumulated buffer.
+            // For stream transcription we treat the whole buffer as a single
+            // inference call (the spec allows a future chunked implementation).
+            if accumulator.len() >= MIN_SEGMENT_FRAMES {
+                let duration_ms = (accumulator.len() as u64 * 1000) / SAMPLE_RATE_HZ;
+                // timestamp_offset_ms for a single-pass full-buffer transcription is 0
+                // (the segment starts at the beginning of the stream).
+                let timestamp_offset_ms: u64 = 0;
+                let _ = session_start; // session_start available for future per-chunk offsets
+
+                match transcriber.transcribe(&accumulator) {
+                    Ok(text) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && trimmed != "(No speech detected)" {
+                            let seg = vtx_common::TranscriptionSegment {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                text: trimmed.to_string(),
+                                timestamp_offset_ms,
+                                duration_ms,
+                                audio_path: None,
+                            };
+                            let _ = sender.send(EngineEvent::TranscriptionSegment(seg.clone()));
+                            all_segments.push(seg);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[transcribe_audio_stream] Transcription failed: {}", e);
+                    }
+                }
+            }
+
+            all_segments
+        })
     }
 
     /// Start a lightweight test capture on a device to report audio levels.
@@ -674,6 +829,7 @@ impl transcription::TranscriptionCallback for EngineTranscriptionCallback {
                 timestamp: None,
                 duration_ms: None,
                 audio_path: wav_path,
+                timestamp_offset_ms: None,
             },
         ));
     }

@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::broadcast;
 use tracing::info;
-use vtx_common::{RecordingMode, TranscriptionMode};
+use vtx_common::{RecordingMode, TranscriptionMode, TranscriptionProfile, WhisperModel};
 
 use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
 use crate::ptt::PttState;
@@ -64,9 +64,72 @@ impl EngineBuilder {
     // Config field setters
     // -------------------------------------------------------------------------
 
+    /// Set the Whisper model variant to use for transcription.
+    ///
+    /// Path resolution is handled by [`ModelManager`](crate::ModelManager).
+    pub fn model(mut self, model: WhisperModel) -> Self {
+        self.config.model = model;
+        self
+    }
+
     /// Override the Whisper model file path.
+    ///
+    /// **Deprecated** — use [`model`](Self::model) instead. When set, this
+    /// takes precedence over the `model` field and a warning is logged.
+    #[deprecated(since = "0.2.0", note = "Use EngineBuilder::model instead")]
     pub fn model_path(mut self, path: PathBuf) -> Self {
-        self.config.model_path = Some(path);
+        #[allow(deprecated)]
+        {
+            self.config.model_path = Some(path);
+        }
+        self
+    }
+
+    /// Enable or disable word-break segmentation.
+    ///
+    /// When `false`, the audio loop still detects word-break events internally
+    /// but does not split segments at pause boundaries. Segment boundaries are
+    /// determined solely by speech-end detection and `segment_max_duration_ms`.
+    /// Defaults to `true`.
+    pub fn word_break_segmentation_enabled(mut self, enabled: bool) -> Self {
+        self.config.word_break_segmentation_enabled = enabled;
+        self
+    }
+
+    /// Apply a [`TranscriptionProfile`] preset, seeding `EngineConfig` with
+    /// the profile's default values.
+    ///
+    /// This method **overwrites** any previously-set fields covered by the
+    /// profile. Call individual setters *after* `with_profile` to override
+    /// specific fields.
+    ///
+    /// `Custom` profile does nothing — all fields remain at their `Default`.
+    pub fn with_profile(mut self, profile: TranscriptionProfile) -> Self {
+        match profile {
+            TranscriptionProfile::Dictation => {
+                self.config.vad_voiced_threshold_db = -42.0;
+                self.config.vad_whisper_threshold_db = -52.0;
+                self.config.vad_voiced_onset_ms = 80;
+                self.config.vad_whisper_onset_ms = 120;
+                self.config.segment_max_duration_ms = 4_000;
+                self.config.segment_word_break_grace_ms = 750;
+                self.config.word_break_segmentation_enabled = true;
+                self.config.model = WhisperModel::BaseEn;
+            }
+            TranscriptionProfile::Transcription => {
+                self.config.vad_voiced_threshold_db = -42.0;
+                self.config.vad_whisper_threshold_db = -52.0;
+                self.config.vad_voiced_onset_ms = 80;
+                self.config.vad_whisper_onset_ms = 120;
+                self.config.segment_max_duration_ms = 15_000;
+                self.config.segment_word_break_grace_ms = 0;
+                self.config.word_break_segmentation_enabled = false;
+                self.config.model = WhisperModel::MediumEn;
+            }
+            TranscriptionProfile::Custom => {
+                // No presets applied; caller supplies all values via setters.
+            }
+        }
         self
     }
 
@@ -176,6 +239,21 @@ impl EngineBuilder {
         let (sender, receiver) = broadcast::channel(BROADCAST_CAPACITY);
         let sender = Arc::new(sender);
 
+        // Resolve the model path: model_path (deprecated) takes precedence, then model enum.
+        #[allow(deprecated)]
+        let resolved_model_path = if let Some(ref explicit_path) = self.config.model_path {
+            tracing::warn!(
+                "[EngineBuilder] model_path is deprecated (since 0.2.0). \
+                 Use EngineConfig::model instead. Falling back to explicit path: {}",
+                explicit_path.display()
+            );
+            explicit_path.clone()
+        } else {
+            // Use ModelManager to resolve path from the WhisperModel enum.
+            crate::model_manager::ModelManager::new("vtx-engine")
+                .path(self.config.model)
+        };
+
         // Optionally initialize transcription worker
         let transcription_queue = if self.transcription_enabled {
             let callback = EngineTranscriptionCallback {
@@ -184,10 +262,7 @@ impl EngineBuilder {
             let queue = Arc::new(transcription::TranscriptionQueue::new());
             queue.set_callback(Arc::new(callback));
 
-            let model_path = self.config.model_path.clone().unwrap_or_else(|| {
-                transcription::Transcriber::new().get_model_path().clone()
-            });
-            queue.start_worker(model_path);
+            queue.start_worker(resolved_model_path);
             Some(queue)
         } else {
             None
