@@ -33,17 +33,6 @@ pub enum RecordingMode {
     EchoCancel,
 }
 
-/// Transcription mode - determines how speech segment boundaries are identified.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TranscriptionMode {
-    /// VAD-triggered - speech detection determines segment boundaries
-    #[default]
-    Automatic,
-    /// Manual key-controlled - PTT press/release determines segment boundaries
-    PushToTalk,
-}
-
 /// Information about an audio device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -343,7 +332,7 @@ impl KeyCode {
     }
 }
 
-/// A set of keys that must all be held simultaneously to trigger PTT.
+/// A set of keys that must all be held simultaneously to trigger a hotkey action.
 ///
 /// Order of keys does not matter for equality — two combinations with the same
 /// keys in different order are considered equal.
@@ -734,4 +723,11 @@ pub enum EngineEvent {
     /// A single timestamped transcription segment from `transcribe_audio_stream`
     /// or `transcribe_audio_file`. NOT emitted during live-capture dictation.
     TranscriptionSegment(TranscriptionSegment),
+    /// Manual recording started (via `start_recording`)
+    RecordingStarted,
+    /// Manual recording stopped (via `stop_recording`)
+    RecordingStopped {
+        /// Duration in milliseconds
+        duration_ms: u64,
+    },
 }

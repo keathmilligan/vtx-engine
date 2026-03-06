@@ -9,12 +9,11 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use vtx_common::*;
-use vtx_engine::{AudioEngine, EngineBuilder, PushToTalkController};
+use vtx_engine::{AudioEngine, EngineBuilder};
 
 /// Application state shared across Tauri commands.
 struct AppState {
     engine: Arc<Mutex<Option<AudioEngine>>>,
-    ptt: Arc<Mutex<Option<PushToTalkController>>>,
 }
 
 // =============================================================================
@@ -119,27 +118,26 @@ async fn is_transcription_enabled(state: tauri::State<'_, AppState>) -> Result<b
 }
 
 #[tauri::command]
-async fn ptt_press(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let ptt_lock = state.ptt.lock().await;
-    if let Some(ref ptt) = *ptt_lock {
-        ptt.press();
-    }
+async fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.start_recording();
     Ok(())
 }
 
 #[tauri::command]
-async fn ptt_release(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let ptt_lock = state.ptt.lock().await;
-    if let Some(ref ptt) = *ptt_lock {
-        ptt.release();
-    }
+async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.stop_recording();
     Ok(())
 }
 
 #[tauri::command]
-async fn is_ptt_active(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let ptt_lock = state.ptt.lock().await;
-    Ok(ptt_lock.as_ref().map(|p| p.is_active()).unwrap_or(false))
+async fn is_recording(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    Ok(engine.is_recording())
 }
 
 // =============================================================================
@@ -165,11 +163,9 @@ pub fn run() {
 
             let state = AppState {
                 engine: Arc::new(Mutex::new(None)),
-                ptt: Arc::new(Mutex::new(None)),
             };
 
             let engine_arc = state.engine.clone();
-            let ptt_arc = state.ptt.clone();
 
             tauri::async_runtime::spawn(async move {
                 match EngineBuilder::new().build().await {
@@ -217,11 +213,15 @@ pub fn run() {
                                 EngineEvent::TranscriptionSegment(seg) => {
                                     let _ = ah.emit("transcription-segment", seg);
                                 }
+                                EngineEvent::RecordingStarted => {
+                                    let _ = ah.emit("recording-started", ());
+                                }
+                                EngineEvent::RecordingStopped { duration_ms } => {
+                                    let _ = ah.emit("recording-stopped", duration_ms);
+                                }
                             }
                         }).spawn();
 
-                        let ptt = engine.ptt_controller();
-                        *ptt_arc.lock().await = Some(ptt);
                         *engine_arc.lock().await = Some(engine);
                     }
                     Err(e) => {
@@ -246,9 +246,9 @@ pub fn run() {
             get_gpu_status,
             set_transcription_enabled,
             is_transcription_enabled,
-            ptt_press,
-            ptt_release,
-            is_ptt_active,
+            start_recording,
+            stop_recording,
+            is_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

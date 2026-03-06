@@ -34,7 +34,6 @@ pub mod history;
 pub mod model_manager;
 pub mod platform;
 pub mod processor;
-pub mod ptt;
 pub mod transcription;
 
 use std::path::PathBuf;
@@ -47,7 +46,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 use vtx_common::*;
-use vtx_common::WhisperModel;
 
 // Re-export common types and new public types
 pub use vtx_common;
@@ -55,7 +53,6 @@ pub use builder::EngineBuilder;
 pub use config_persistence::ConfigError;
 pub use history::{HistoryError, TranscriptionHistory, TranscriptionHistoryRecorder};
 pub use model_manager::{ModelError, ModelManager};
-pub use ptt::PushToTalkController;
 
 // =============================================================================
 // EngineConfig
@@ -88,11 +85,6 @@ pub struct EngineConfig {
     /// AEC and outputs only the echo-cancelled primary source.
     #[serde(default)]
     pub recording_mode: RecordingMode,
-
-    /// Transcription mode: `Automatic` uses VAD; `PushToTalk` uses
-    /// explicit press/release signals via [`PushToTalkController`].
-    #[serde(default)]
-    pub transcription_mode: TranscriptionMode,
 
     /// Voiced speech detection threshold in dB (default -42.0).
     #[serde(default = "default_vad_voiced_threshold_db")]
@@ -161,7 +153,6 @@ impl Default for EngineConfig {
             model: WhisperModel::BaseEn,
             model_path: None,
             recording_mode: RecordingMode::default(),
-            transcription_mode: TranscriptionMode::default(),
             vad_voiced_threshold_db: default_vad_voiced_threshold_db(),
             vad_whisper_threshold_db: default_vad_whisper_threshold_db(),
             vad_voiced_onset_ms: default_vad_voiced_onset_ms(),
@@ -247,8 +238,12 @@ pub struct AudioEngine {
     visualization_enabled: bool,
     /// Global shutdown flag
     shutdown_flag: Arc<AtomicBool>,
-    /// PTT shared state (shared with PushToTalkController)
-    ptt_state: Arc<std::sync::Mutex<ptt::PttState>>,
+    /// Whether a manual recording session is active
+    recording_active: Arc<AtomicBool>,
+    /// Timestamp when manual recording started (for duration tracking)
+    recording_start: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Resolved path to the whisper model file
+    model_path: std::path::PathBuf,
 }
 
 impl AudioEngine {
@@ -267,14 +262,73 @@ impl AudioEngine {
         self.sender.subscribe()
     }
 
-    /// Get a [`PushToTalkController`] for this engine. The controller is
-    /// `Clone + Send` and can be moved to any thread or task.
-    pub fn ptt_controller(&self) -> PushToTalkController {
-        PushToTalkController::new(
-            self.ptt_state.clone(),
-            self.sender.clone(),
-            self.transcribe_state.clone(),
-        )
+    /// Start a manual recording session.
+    ///
+    /// While recording, captured audio is accumulated in a growable buffer
+    /// (up to 30 minutes). VAD-driven segmentation is suppressed. Call
+    /// [`stop_recording`](Self::stop_recording) to submit the accumulated
+    /// audio for transcription.
+    ///
+    /// Emits [`EngineEvent::RecordingStarted`]. No-op if already recording.
+    ///
+    /// Requires that audio capture is active (via [`start_capture`](Self::start_capture)).
+    pub fn start_recording(&self) {
+        if self.recording_active.swap(true, Ordering::SeqCst) {
+            // Already recording — no-op
+            return;
+        }
+
+        info!("[Engine] Manual recording started");
+        *self.recording_start.lock().unwrap() = Some(std::time::Instant::now());
+
+        if let Ok(mut ts) = self.transcribe_state.lock() {
+            ts.set_manual_recording(true);
+            ts.is_active = true;
+        }
+
+        let _ = self.sender.send(EngineEvent::RecordingStarted);
+    }
+
+    /// Stop the manual recording session and submit the accumulated audio
+    /// for transcription.
+    ///
+    /// Emits [`EngineEvent::RecordingStopped`] with the session duration.
+    /// No-op if not currently recording.
+    pub fn stop_recording(&self) {
+        // Acquire the transcribe-state lock BEFORE clearing recording_active.
+        // This prevents a race where the audio loop thread sees
+        // recording_active == false, enters the else branch, and sets
+        // ts.is_active = false (from the transcription_enabled flag) before
+        // we call submit_recording(). With the lock held the audio loop's
+        // try_lock() will fail harmlessly, preserving is_active == true so
+        // submit_recording() processes the accumulated audio.
+        let ts_lock = self.transcribe_state.lock().ok();
+
+        if !self.recording_active.swap(false, Ordering::SeqCst) {
+            // Not recording — no-op
+            return;
+        }
+
+        let duration_ms = self.recording_start
+            .lock()
+            .unwrap()
+            .take()
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+
+        info!("[Engine] Manual recording stopped ({}ms)", duration_ms);
+
+        if let Some(mut ts) = ts_lock {
+            ts.submit_recording();
+            ts.set_manual_recording(false);
+        }
+
+        let _ = self.sender.send(EngineEvent::RecordingStopped { duration_ms });
+    }
+
+    /// Whether a manual recording session is currently active.
+    pub fn is_recording(&self) -> bool {
+        self.recording_active.load(Ordering::SeqCst)
     }
 
     /// List available input devices (microphones).
@@ -327,8 +381,7 @@ impl AudioEngine {
         let transcription_enabled = self.transcription_enabled.clone();
         let vad_enabled = self.vad_enabled;
         let visualization_enabled = self.visualization_enabled;
-        let ptt_state = self.ptt_state.clone();
-        let transcription_mode = self.config.transcription_mode;
+        let recording_active = self.recording_active.clone();
         let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
 
         loop_active.store(true, Ordering::SeqCst);
@@ -371,7 +424,7 @@ impl AudioEngine {
                         }
                     }
 
-                    // --- Speech state changes (VAD only, not PTT) ---
+                    // --- Speech state changes (VAD) ---
                     if vad_enabled {
                         let new_state = speech_detector.take_state_change();
                         let new_wb = speech_detector.take_word_break_event();
@@ -384,15 +437,19 @@ impl AudioEngine {
                         }
                     }
 
+                    let is_manual_recording = recording_active.load(Ordering::SeqCst);
+
                     if let Ok(mut ts) = transcribe_state.try_lock() {
-                        ts.is_active = transcription_enabled.load(Ordering::SeqCst);
+                        if is_manual_recording {
+                            // Manual recording: is_active is managed by
+                            // start_recording/stop_recording, not the global flag.
+                            ts.process_samples(&data.samples);
+                        } else {
+                            ts.is_active = transcription_enabled.load(Ordering::SeqCst);
+                        }
 
-                        // In PTT mode the PTT controller drives segment lifecycle;
-                        // suppress VAD-based speech events.
-                        let use_vad_segments = vad_enabled
-                            && transcription_mode != TranscriptionMode::PushToTalk;
-
-                        if ts.is_active && use_vad_segments {
+                        if !is_manual_recording && ts.is_active && vad_enabled {
+                            // VAD mode: speech detection drives segmentation.
                             if let processor::SpeechStateChange::Started { lookback_samples } =
                                 &pending_state_change
                             {
@@ -416,21 +473,7 @@ impl AudioEngine {
                                     ts.on_word_break(wb.offset_ms, wb.gap_duration_ms);
                                 }
                             } else {
-                                // Discard word-break events — segment boundaries are
-                                // determined by speech-end and segment_max_duration_ms.
-                                // (pending_word_break is cleared below regardless, but
-                                // we drop it explicitly here to document intent.)
                                 drop(pending_word_break.take());
-                            }
-                        } else if ts.is_active {
-                            // PTT mode: still write samples into the ring buffer
-                            // but don't act on VAD events.
-                            let is_ptt_active = ptt_state
-                                .lock()
-                                .map(|s| s.is_active)
-                                .unwrap_or(false);
-                            if is_ptt_active {
-                                ts.process_samples(&data.samples);
                             }
                         }
 
@@ -476,17 +519,16 @@ impl AudioEngine {
 
     /// Check if the Whisper model is available.
     pub fn check_model_status(&self) -> ModelStatus {
-        let transcriber = transcription::Transcriber::new();
         ModelStatus {
-            available: transcriber.is_model_available(),
-            path: transcriber.get_model_path().to_string_lossy().to_string(),
+            available: self.model_path.exists(),
+            path: self.model_path.to_string_lossy().to_string(),
         }
     }
 
     /// Download the Whisper model, emitting progress events.
     pub async fn download_model(&self) -> Result<(), String> {
         let sender = self.sender.clone();
-        let model_path = transcription::Transcriber::new().get_model_path().clone();
+        let model_path = self.model_path.clone();
 
         let s = sender.clone();
         let result = transcription::download_model(&model_path, move |percent| {
@@ -512,19 +554,16 @@ impl AudioEngine {
         self.transcription_enabled.load(Ordering::SeqCst)
     }
 
-    /// Finalize and submit the current recording session for transcription.
+    /// Finalize and submit any pending audio segment for transcription.
     ///
-    /// In PTT mode, this submits the audio accumulated since the last
-    /// `press()`. Prefer using [`PushToTalkController::release`] instead,
-    /// which calls this automatically.
+    /// If a manual recording is active, stops it and submits the accumulated
+    /// audio. Otherwise, finalizes any in-progress VAD segment.
     pub fn finalize_segment(&self) {
         info!("[Engine] Finalizing recording session for transcription");
-        if let Ok(mut ts) = self.transcribe_state.lock() {
-            if ts.ptt_mode {
-                ts.submit_session();
-            } else {
-                ts.finalize();
-            }
+        if self.recording_active.load(Ordering::SeqCst) {
+            self.stop_recording();
+        } else if let Ok(mut ts) = self.transcribe_state.lock() {
+            ts.finalize();
         }
     }
 
@@ -785,6 +824,7 @@ impl AudioEngine {
     /// Request engine shutdown.
     pub fn shutdown(&self) {
         info!("Engine shutdown requested");
+        self.recording_active.store(false, Ordering::SeqCst);
         self.shutdown_flag.store(true, Ordering::SeqCst);
         self.audio_loop_active.store(false, Ordering::SeqCst);
         if let Some(backend) = platform::get_backend() {

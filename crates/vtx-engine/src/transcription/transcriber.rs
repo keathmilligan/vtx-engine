@@ -40,6 +40,15 @@ impl Transcriber {
         }
     }
 
+    /// Create a new transcriber with an explicit model path.
+    pub fn with_model_path(model_path: PathBuf) -> Self {
+        Self {
+            ctx: None,
+            model_path,
+            library_initialized: false,
+        }
+    }
+
     /// Get the path to the model file.
     pub fn get_model_path(&self) -> &PathBuf {
         &self.model_path

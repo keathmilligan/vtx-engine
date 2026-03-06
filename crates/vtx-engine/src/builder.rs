@@ -6,10 +6,9 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::broadcast;
 use tracing::info;
-use vtx_common::{RecordingMode, TranscriptionMode, TranscriptionProfile, WhisperModel};
+use vtx_common::{RecordingMode, TranscriptionProfile, WhisperModel};
 
 use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
-use crate::ptt::PttState;
 use crate::transcription;
 
 /// Broadcast channel capacity.
@@ -34,6 +33,7 @@ const BROADCAST_CAPACITY: usize = 256;
 /// ```
 pub struct EngineBuilder {
     config: EngineConfig,
+    app_name: String,
     transcription_enabled: bool,
     visualization_enabled: bool,
     vad_enabled: bool,
@@ -44,6 +44,7 @@ impl EngineBuilder {
     pub fn new() -> Self {
         Self {
             config: EngineConfig::default(),
+            app_name: "vtx-engine".to_string(),
             transcription_enabled: true,
             visualization_enabled: true,
             vad_enabled: true,
@@ -54,10 +55,22 @@ impl EngineBuilder {
     pub fn from_config(config: EngineConfig) -> Self {
         Self {
             config,
+            app_name: "vtx-engine".to_string(),
             transcription_enabled: true,
             visualization_enabled: true,
             vad_enabled: true,
         }
+    }
+
+    /// Set the application name used for resolving data directories
+    /// (model cache, config, history).
+    ///
+    /// Defaults to `"vtx-engine"`. Host applications should set this to
+    /// their own name so that model files, config, and history are stored
+    /// under the application's own data directory rather than vtx-engine's.
+    pub fn app_name(mut self, name: impl Into<String>) -> Self {
+        self.app_name = name.into();
+        self
     }
 
     // -------------------------------------------------------------------------
@@ -139,12 +152,6 @@ impl EngineBuilder {
         self
     }
 
-    /// Set transcription mode (`Automatic` or `PushToTalk`).
-    pub fn transcription_mode(mut self, mode: TranscriptionMode) -> Self {
-        self.config.transcription_mode = mode;
-        self
-    }
-
     /// Set the voiced speech detection threshold in dB.
     pub fn vad_voiced_threshold_db(mut self, db: f32) -> Self {
         self.config.vad_voiced_threshold_db = db;
@@ -218,7 +225,8 @@ impl EngineBuilder {
     }
 
     /// Disable the VAD subsystem. No `SpeechStarted`/`SpeechEnded` events
-    /// will be emitted from VAD. (PTT signals still work.)
+    /// will be emitted from VAD. (Manual recording via `start_recording`/
+    /// `stop_recording` still works.)
     pub fn without_vad(mut self) -> Self {
         self.vad_enabled = false;
         self
@@ -250,7 +258,7 @@ impl EngineBuilder {
             explicit_path.clone()
         } else {
             // Use ModelManager to resolve path from the WhisperModel enum.
-            crate::model_manager::ModelManager::new("vtx-engine")
+            crate::model_manager::ModelManager::new(&self.app_name)
                 .path(self.config.model)
         };
 
@@ -262,7 +270,7 @@ impl EngineBuilder {
             let queue = Arc::new(transcription::TranscriptionQueue::new());
             queue.set_callback(Arc::new(callback));
 
-            queue.start_worker(resolved_model_path);
+            queue.start_worker(resolved_model_path.clone());
             Some(queue)
         } else {
             None
@@ -277,8 +285,6 @@ impl EngineBuilder {
             transcription::TranscribeState::new(queue_for_state),
         ));
 
-        let ptt_state = Arc::new(std::sync::Mutex::new(PttState { is_active: false }));
-
         let engine = AudioEngine {
             config: self.config,
             sender,
@@ -289,7 +295,9 @@ impl EngineBuilder {
             vad_enabled: self.vad_enabled,
             visualization_enabled: self.visualization_enabled,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
-            ptt_state,
+            recording_active: Arc::new(AtomicBool::new(false)),
+            recording_start: Arc::new(std::sync::Mutex::new(None)),
+            model_path: resolved_model_path,
         };
 
         Ok((engine, receiver))

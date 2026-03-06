@@ -125,13 +125,23 @@ impl TranscriptionQueue {
         let callback = Arc::clone(&self.callback);
 
         thread::spawn(move || {
-            let mut transcriber = Transcriber::new();
+            let mut transcriber = Transcriber::with_model_path(model_path.clone());
 
             // Try to load model at start
             if model_path.exists() {
                 if let Err(e) = transcriber.load_model() {
                     tracing::error!("[TranscriptionQueue] Failed to load model: {}", e);
+                } else {
+                    tracing::info!(
+                        "[TranscriptionQueue] Model loaded at startup from: {}",
+                        model_path.display()
+                    );
                 }
+            } else {
+                tracing::warn!(
+                    "[TranscriptionQueue] Model not found at startup: {}",
+                    model_path.display()
+                );
             }
 
             loop {

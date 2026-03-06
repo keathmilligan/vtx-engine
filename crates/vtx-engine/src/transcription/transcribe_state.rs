@@ -1,8 +1,8 @@
-//! Automatic transcription mode with continuous recording and speech-based segmentation.
+//! Transcription state management with continuous recording and speech-based segmentation.
 //!
 //! This module provides:
-//! - `SegmentRingBuffer`: A ring buffer for continuous audio capture
-//! - `TranscribeState`: State management for transcribe mode
+//! - `SegmentRingBuffer`: A ring buffer for continuous audio capture (VAD mode)
+//! - `TranscribeState`: State management for both VAD-driven and manual recording modes
 
 use std::sync::Arc;
 
@@ -14,10 +14,10 @@ use super::queue::{QueuedSegment, TranscriptionQueue};
 /// 48000 * 30 * 2 = 2,880,000 samples
 const RING_BUFFER_CAPACITY: usize = 48000 * 30 * 2;
 
-/// Maximum PTT (manual) recording buffer duration: 30 minutes at 48kHz stereo.
+/// Maximum manual recording buffer duration: 30 minutes at 48kHz stereo.
 /// 48000 * 60 * 30 * 2 = 172,800,000 samples (~660 MB of f32).
 /// Audio beyond this limit is silently dropped and a warning is emitted once.
-const PTT_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30 * 2;
+const MANUAL_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30 * 2;
 
 /// Overflow threshold: 90% of buffer capacity
 const OVERFLOW_THRESHOLD_PERCENT: usize = 90;
@@ -215,17 +215,18 @@ pub struct TranscribeState {
     lookback_sample_count: usize,
     /// Callback for state events
     callback: Option<Arc<dyn TranscribeStateCallback>>,
-    /// PTT mode - disables automatic segmentation
-    pub ptt_mode: bool,
-    /// Growable audio accumulator for PTT (manual) recording sessions.
+    /// Manual recording mode - disables automatic VAD segmentation.
+    /// When true, audio is buffered until `submit_recording()` is called.
+    pub manual_recording: bool,
+    /// Growable audio accumulator for manual recording sessions.
     ///
-    /// In PTT mode audio is appended here instead of relying on the ring buffer,
-    /// so the full session is preserved without wraparound loss.  Capped at
-    /// `PTT_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz stereo).
-    ptt_audio_buffer: Vec<f32>,
-    /// Set to true after the first time the PTT buffer hits the 30-minute cap,
+    /// In manual recording mode audio is appended here instead of relying on
+    /// the ring buffer, so the full session is preserved without wraparound
+    /// loss. Capped at `MANUAL_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz stereo).
+    manual_audio_buffer: Vec<f32>,
+    /// Set to true after the first time the manual buffer hits the 30-minute cap,
     /// so the overflow warning is emitted only once per session.
-    ptt_buffer_full_warned: bool,
+    manual_buffer_full_warned: bool,
 }
 
 impl TranscribeState {
@@ -244,53 +245,57 @@ impl TranscribeState {
             word_break_seek_start_samples: 0,
             lookback_sample_count: 0,
             callback: None,
-            ptt_mode: false,
-            ptt_audio_buffer: Vec::new(),
-            ptt_buffer_full_warned: false,
+            manual_recording: false,
+            manual_audio_buffer: Vec::new(),
+            manual_buffer_full_warned: false,
         }
     }
 
-    /// Enable or disable PTT (push-to-talk / manual) mode.
+    /// Enable or disable manual recording mode.
     ///
-    /// In PTT mode all VAD-driven segmentation is suppressed — `on_speech_started`,
-    /// `on_speech_ended`, and `on_word_break` are all ignored.  Audio is written
-    /// continuously to the ring buffer and submitted only when `submit_session` is
-    /// called explicitly (typically when recording is stopped).
-    pub fn set_ptt_mode(&mut self, enabled: bool) {
-        self.ptt_mode = enabled;
+    /// In manual recording mode all VAD-driven segmentation is suppressed —
+    /// `on_speech_started`, `on_speech_ended`, and `on_word_break` are all
+    /// ignored.  Audio is written continuously to a growable buffer and
+    /// submitted only when `submit_recording()` is called explicitly.
+    pub fn set_manual_recording(&mut self, enabled: bool) {
+        self.manual_recording = enabled;
         if enabled {
-            tracing::debug!("[TranscribeState] PTT mode enabled - all VAD segmentation disabled");
+            tracing::debug!(
+                "[TranscribeState] Manual recording enabled - VAD segmentation disabled"
+            );
         } else {
             tracing::debug!(
-                "[TranscribeState] PTT mode disabled - automatic VAD segmentation active"
+                "[TranscribeState] Manual recording disabled - automatic VAD segmentation active"
             );
         }
     }
 
-    /// Submit the entire accumulated PTT session audio for transcription.
+    /// Submit the entire accumulated manual recording audio for transcription.
     ///
-    /// Drains the `ptt_audio_buffer` (the growable Vec accumulated during the
-    /// manual recording session) and queues it for transcription.  The ring
-    /// buffer is not consulted here — all PTT audio lives in `ptt_audio_buffer`.
+    /// Drains the `manual_audio_buffer` (the growable Vec accumulated during
+    /// the manual recording session) and queues it for transcription. The ring
+    /// buffer is not consulted here — all manual recording audio lives in
+    /// `manual_audio_buffer`.
     ///
-    /// Intended for use at the end of a manual (PTT) recording session.
-    pub fn submit_session(&mut self) {
+    /// Intended for use at the end of a manual recording session (e.g., when
+    /// the app calls `stop_recording()`).
+    pub fn submit_recording(&mut self) {
         if !self.is_active {
             return;
         }
 
         // Take ownership of the accumulated audio and reset the buffer so the
         // struct is immediately ready for the next session.
-        let segment: Vec<f32> = std::mem::take(&mut self.ptt_audio_buffer);
-        self.ptt_buffer_full_warned = false;
+        let segment: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
+        self.manual_buffer_full_warned = false;
 
         if segment.is_empty() {
-            tracing::debug!("[TranscribeState] submit_session: no audio accumulated");
+            tracing::debug!("[TranscribeState] submit_recording: no audio accumulated");
             return;
         }
 
         tracing::info!(
-            "[TranscribeState] submit_session: submitting {} samples ({:.1}s) from PTT buffer",
+            "[TranscribeState] submit_recording: submitting {} samples ({:.1}s) from manual buffer",
             segment.len(),
             segment.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
         );
@@ -326,8 +331,8 @@ impl TranscribeState {
         self.seeking_word_break = false;
         self.word_break_seek_start_samples = 0;
         self.lookback_sample_count = 0;
-        self.ptt_audio_buffer.clear();
-        self.ptt_buffer_full_warned = false;
+        self.manual_audio_buffer.clear();
+        self.manual_buffer_full_warned = false;
     }
 
     /// Activate transcribe mode
@@ -350,39 +355,39 @@ impl TranscribeState {
 
     /// Process incoming audio samples - writes to ring buffer and checks for overflow/duration
     /// Returns Some(segment) if overflow extraction or grace period extraction occurred
-    /// Note: In PTT mode, automatic segmentation is disabled and this always returns None
+    /// Note: In manual recording mode, automatic segmentation is disabled and this always returns None
     pub fn process_samples(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
         if !self.is_active {
             return None;
         }
 
-        // In PTT mode, skip all automatic segmentation.
-        // Append audio to the dedicated PTT buffer up to the 30-minute cap.
-        if self.ptt_mode {
+        // In manual recording mode, skip all automatic segmentation.
+        // Append audio to the dedicated buffer up to the 30-minute cap.
+        if self.manual_recording {
             let remaining_capacity =
-                PTT_MAX_BUFFER_SAMPLES.saturating_sub(self.ptt_audio_buffer.len());
+                MANUAL_MAX_BUFFER_SAMPLES.saturating_sub(self.manual_audio_buffer.len());
 
             if remaining_capacity == 0 {
                 // Buffer is already at the cap — emit one warning and drop all further audio.
-                if !self.ptt_buffer_full_warned {
+                if !self.manual_buffer_full_warned {
                     tracing::warn!(
-                        "[TranscribeState] PTT recording has reached the 30-minute maximum \
+                        "[TranscribeState] Manual recording has reached the 30-minute maximum \
                          buffer limit. Further audio will be discarded."
                     );
-                    self.ptt_buffer_full_warned = true;
+                    self.manual_buffer_full_warned = true;
                 }
             } else {
                 // Accept as many samples as fit within the cap.
                 let samples_to_write = samples.len().min(remaining_capacity);
-                self.ptt_audio_buffer
+                self.manual_audio_buffer
                     .extend_from_slice(&samples[..samples_to_write]);
 
-                if samples_to_write < samples.len() && !self.ptt_buffer_full_warned {
+                if samples_to_write < samples.len() && !self.manual_buffer_full_warned {
                     tracing::warn!(
-                        "[TranscribeState] PTT recording has reached the 30-minute maximum \
+                        "[TranscribeState] Manual recording has reached the 30-minute maximum \
                          buffer limit. Further audio will be discarded."
                     );
-                    self.ptt_buffer_full_warned = true;
+                    self.manual_buffer_full_warned = true;
                 }
             }
 
@@ -462,7 +467,7 @@ impl TranscribeState {
     /// Note: `lookback_samples` from the speech detector is in MONO samples (frames).
     /// We need to convert to stereo samples for the ring buffer which stores interleaved stereo.
     pub fn on_speech_started(&mut self, lookback_samples: usize) {
-        if !self.is_active || self.ptt_mode {
+        if !self.is_active || self.manual_recording {
             return;
         }
 
@@ -488,7 +493,7 @@ impl TranscribeState {
 
     /// Handle speech-ended event: extract segment and queue for transcription
     pub fn on_speech_ended(&mut self) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || self.ptt_mode {
+        if !self.is_active || !self.in_speech || self.manual_recording {
             return None;
         }
 
@@ -544,7 +549,7 @@ impl TranscribeState {
     /// This ensures we capture all speech before the pause and don't accidentally cut into
     /// the end of a word. The next segment will naturally start from this point.
     pub fn on_word_break(&mut self, offset_ms: u32, gap_duration_ms: u32) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || !self.seeking_word_break || self.ptt_mode {
+        if !self.is_active || !self.in_speech || !self.seeking_word_break || self.manual_recording {
             return None;
         }
 
@@ -757,9 +762,15 @@ impl TranscribeState {
         }
     }
 
-    /// Finalize any pending segment (called when transcribe mode is stopped)
+    /// Finalize any pending segment (called when transcribe mode is stopped).
+    ///
+    /// In manual recording mode, submits the accumulated recording buffer.
+    /// In VAD mode, extracts and queues the in-progress speech segment.
     pub fn finalize(&mut self) -> Option<Vec<f32>> {
-        if self.in_speech {
+        if self.manual_recording {
+            self.submit_recording();
+            None
+        } else if self.in_speech {
             // Extract and queue the in-progress segment
             self.on_speech_ended()
         } else {
