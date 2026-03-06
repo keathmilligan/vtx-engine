@@ -8,8 +8,8 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use vtx_common::*;
 use vtx_engine::{AudioEngine, EngineBuilder};
+use vtx_engine::*;
 
 /// Application state shared across Tauri commands.
 struct AppState {
@@ -79,7 +79,7 @@ async fn download_model(state: tauri::State<'_, AppState>) -> Result<(), String>
 async fn transcribe_file(
     state: tauri::State<'_, AppState>,
     path: String,
-) -> Result<Vec<vtx_common::TranscriptionSegment>, String> {
+) -> Result<Vec<vtx_engine::TranscriptionSegment>, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     engine.transcribe_audio_file(path).await

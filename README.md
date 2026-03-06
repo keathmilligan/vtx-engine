@@ -2,15 +2,36 @@
 
 A reusable voice processing and transcription library built in Rust with TypeScript visualization support for Tauri applications.
 
-Extracted from [FlowSTT](https://github.com/user/flowstt), vtx-engine provides platform-native audio capture, real-time speech detection, audio visualization, and Whisper-based transcription as composable libraries that can be shared across projects.
+Extracted from [FlowSTT](https://github.com/keathmilligan/flowstt), vtx-engine provides platform-native audio capture, real-time speech detection, audio visualization, and Whisper-based transcription as composable libraries that can be shared across projects.
+
+## Usage
+
+### Production (crates.io)
+
+```toml
+[dependencies]
+vtx-engine = "0.1"
+```
+
+All public types (`EngineEvent`, `AudioDevice`, `WhisperModel`, etc.) are available directly under the `vtx_engine` namespace — no additional crate dependency required.
+
+### Local development (path or Git)
+
+```toml
+[dependencies]
+# Path dependency (local checkout)
+vtx-engine = { path = "../vtx-engine/crates/vtx-engine" }
+
+# Git dependency (pinned to a tag or branch)
+vtx-engine = { git = "https://github.com/keathmilligan/vtx-engine", tag = "v0.1.0" }
+```
 
 ## Project Structure
 
 ```
 vtx-engine/
 ├── crates/
-│   ├── vtx-common/          Shared types (AudioDevice, EngineEvent, WhisperModel, etc.)
-│   └── vtx-engine/          Core Rust library
+│   └── vtx-engine/          Core Rust library (includes all shared types)
 │       ├── platform/        Audio capture backends (WASAPI, CoreAudio, PipeWire)
 │       ├── processor.rs     Speech detection + visualization processing
 │       └── transcription/   Whisper FFI, transcription queue, segmentation
@@ -21,12 +42,6 @@ vtx-engine/
 ```
 
 ## Crates
-
-### vtx-common
-
-Shared type definitions used by both the Rust engine and TypeScript frontend. All types derive `Serialize`/`Deserialize` for seamless Tauri IPC.
-
-Key types: `AudioDevice`, `VisualizationData`, `SpeechMetrics`, `TranscriptionResult`, `TranscriptionSegment`, `EngineEvent`, `EngineStatus`, `ModelStatus`, `GpuStatus`, `WhisperModel`, `TranscriptionProfile`, `TranscriptionMode`, `RecordingMode`.
 
 ### vtx-engine
 
@@ -49,8 +64,7 @@ The core library. Primary entry point is `EngineBuilder`, which produces an `Aud
 **Quick start:**
 
 ```rust
-use vtx_engine::{EngineBuilder, ModelManager};
-use vtx_common::{EngineEvent, TranscriptionProfile, WhisperModel};
+use vtx_engine::{EngineBuilder, ModelManager, EngineEvent, TranscriptionProfile, WhisperModel};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

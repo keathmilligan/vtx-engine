@@ -45,10 +45,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
-use vtx_common::*;
 
-// Re-export common types and new public types
-pub use vtx_common;
+pub mod common;
+pub use common::*;
+
 pub use builder::EngineBuilder;
 pub use config_persistence::ConfigError;
 pub use history::{HistoryError, TranscriptionHistory, TranscriptionHistoryRecorder};
@@ -610,7 +610,7 @@ impl AudioEngine {
     pub async fn transcribe_audio_file(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> Result<Vec<vtx_common::TranscriptionSegment>, String> {
+    ) -> Result<Vec<TranscriptionSegment>, String> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let sender = self.sender.clone();
 
@@ -659,7 +659,7 @@ impl AudioEngine {
                 return Ok(vec![]);
             }
 
-            let seg = vtx_common::TranscriptionSegment {
+            let seg = TranscriptionSegment {
                 id: uuid::Uuid::new_v4().to_string(),
                 text: text.trim().to_string(),
                 timestamp_offset_ms: 0,
@@ -703,7 +703,7 @@ impl AudioEngine {
         &self,
         mut rx: mpsc::Receiver<Vec<f32>>,
         session_start: std::time::Instant,
-    ) -> tokio::task::JoinHandle<Vec<vtx_common::TranscriptionSegment>> {
+    ) -> tokio::task::JoinHandle<Vec<TranscriptionSegment>> {
         let sender = self.sender.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -715,7 +715,7 @@ impl AudioEngine {
 
             let mut transcriber = Transcriber::new();
             let mut accumulator: Vec<f32> = Vec::new();
-            let mut all_segments: Vec<vtx_common::TranscriptionSegment> = Vec::new();
+            let mut all_segments: Vec<TranscriptionSegment> = Vec::new();
 
             // Drain the receiver until it closes (sender dropped).
             // spawn_blocking provides a synchronous context so blocking_recv is correct here.
@@ -745,7 +745,7 @@ impl AudioEngine {
                     Ok(text) => {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() && trimmed != "(No speech detected)" {
-                            let seg = vtx_common::TranscriptionSegment {
+                            let seg = TranscriptionSegment {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 text: trimmed.to_string(),
                                 timestamp_offset_ms,

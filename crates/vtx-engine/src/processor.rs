@@ -1031,7 +1031,7 @@ impl VisualizationProcessor {
     /// Process audio samples for visualization.
     ///
     /// Returns the visualization payload. Also calls the callback if set.
-    pub fn process(&mut self, samples: &[f32]) -> Option<vtx_common::VisualizationData> {
+    pub fn process(&mut self, samples: &[f32]) -> Option<crate::VisualizationData> {
         // Accumulate samples for FFT
         for &sample in samples {
             if self.fft_write_index < self.fft_size {
@@ -1074,11 +1074,11 @@ impl VisualizationProcessor {
             callback.on_visualization_data(payload);
         }
 
-        // Convert to vtx_common types and return
-        let viz = vtx_common::VisualizationData {
+        // Convert to public types and return
+        let viz = crate::VisualizationData {
             waveform,
-            spectrogram: spectrogram.map(|s| vtx_common::SpectrogramColumn { colors: s.colors }),
-            speech_metrics: speech_metrics.map(|m| vtx_common::SpeechMetrics {
+            spectrogram: spectrogram.map(|s| crate::SpectrogramColumn { colors: s.colors }),
+            speech_metrics: speech_metrics.map(|m| crate::SpeechMetrics {
                 amplitude_db: m.amplitude_db,
                 zcr: m.zcr,
                 centroid_hz: m.centroid_hz,

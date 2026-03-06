@@ -8,7 +8,7 @@
 //!
 //! ```rust,no_run
 //! use vtx_engine::ModelManager;
-//! use vtx_common::WhisperModel;
+//! use vtx_engine::WhisperModel;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use vtx_common::WhisperModel;
+use crate::WhisperModel;
 
 // =============================================================================
 // ModelError

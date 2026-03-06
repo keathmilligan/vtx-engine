@@ -20,14 +20,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev cmake
 
-      - name: Publish vtx-common
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p vtx-common
-
-      - name: Wait for vtx-common to be available on crates.io
-        run: sleep 30
-
       - name: Publish vtx-engine
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

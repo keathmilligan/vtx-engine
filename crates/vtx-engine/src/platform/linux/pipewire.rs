@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::platform::backend::{AudioBackend, AudioData};
+use crate::{AudioDevice, AudioSourceType, RecordingMode};
 use aec3::voip::VoipAec3;
-use vtx_common::{AudioDevice, AudioSourceType, RecordingMode};
 
 /// Commands sent to the PipeWire thread
 #[derive(Debug)]

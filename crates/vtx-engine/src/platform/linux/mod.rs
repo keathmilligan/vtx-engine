@@ -3,8 +3,8 @@
 mod pipewire;
 
 use super::AudioBackend;
+use crate::RecordingMode;
 use std::sync::{Arc, Mutex, OnceLock};
-use vtx_common::RecordingMode;
 
 /// Global backend instance
 static BACKEND: OnceLock<Box<dyn AudioBackend>> = OnceLock::new();

@@ -1,6 +1,6 @@
 //! Platform-agnostic audio backend trait.
 
-pub use vtx_common::{AudioData, AudioDevice, RecordingMode};
+pub use crate::{AudioData, AudioDevice, RecordingMode};
 
 /// Platform-agnostic audio backend interface.
 ///

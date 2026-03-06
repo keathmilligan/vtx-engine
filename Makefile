@@ -1,4 +1,4 @@
-.PHONY: all build build-lib build-viz build-demo test dev-demo clean help
+.PHONY: all build build-lib build-viz build-demo test dev-demo clean help publish publish-dry-run
 
 # Default target
 all: build
@@ -10,7 +10,7 @@ all: build
 ## Build everything (Rust library + viz package + demo app)
 build: build-lib build-viz build-demo
 
-## Build the Rust engine crates (vtx-common, vtx-engine)
+## Build the Rust engine crate (vtx-engine)
 build-lib:
 	cargo build --workspace --exclude vtx-demo-src-tauri
 
@@ -49,6 +49,18 @@ dev-tauri:
 ## Watch and rebuild the viz package on changes
 dev-viz:
 	pnpm --filter @vtx-engine/viz dev
+
+##
+## Publish targets
+##
+
+## Dry-run publish (verify package is ready without uploading)
+publish-dry-run:
+	cargo publish --dry-run --allow-dirty -p vtx-engine
+
+## Publish vtx-engine to crates.io (requires CARGO_REGISTRY_TOKEN)
+publish:
+	cargo publish -p vtx-engine
 
 ##
 ## Utility targets

@@ -8,6 +8,7 @@
 
 use crate::platform::backend::{AudioBackend, AudioData};
 use crate::platform::macos::screencapturekit::{self, SCKAudioCapture};
+use crate::{AudioDevice, AudioSourceType, RecordingMode};
 use aec3::voip::VoipAec3;
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_audio_device_supports_scope, get_default_device_id, get_device_name,
@@ -24,7 +25,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use vtx_common::{AudioDevice, AudioSourceType, RecordingMode};
 
 /// Target sample rate for output (matches Linux/Windows backends)
 const TARGET_SAMPLE_RATE: f64 = 48000.0;

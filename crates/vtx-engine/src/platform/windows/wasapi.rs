@@ -7,11 +7,11 @@
 //! - Echo cancellation using AEC3
 
 use crate::platform::backend::{AudioBackend, AudioData};
+use crate::{AudioDevice, AudioSourceType, RecordingMode};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use vtx_common::{AudioDevice, AudioSourceType, RecordingMode};
 
 use aec3::voip::VoipAec3;
 use windows::core::{GUID, PCWSTR, PWSTR};

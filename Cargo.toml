@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/vtx-common",
     "crates/vtx-engine",
     "apps/vtx-demo/src-tauri",
 ]
@@ -12,7 +11,6 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-vtx-common = { path = "crates/vtx-common", version = "0.1.0" }
 vtx-engine = { path = "crates/vtx-engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

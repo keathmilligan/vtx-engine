@@ -6,8 +6,8 @@ license.workspace = true
 description = "Voice processing and transcription engine - audio capture, speech detection, and Whisper transcription"
 keywords = ["audio", "speech", "transcription", "whisper", "vad"]
 categories = ["multimedia::audio", "api-bindings"]
-repository = "https://github.com/user/vtx-engine"
-homepage = "https://github.com/user/vtx-engine"
+repository = "https://github.com/keathmilligan/vtx-engine"
+homepage = "https://github.com/keathmilligan/vtx-engine"
 documentation = "https://docs.rs/vtx-engine"
 exclude = [
     "build/",
@@ -35,7 +35,6 @@ reqwest = { version = "0.12", features = ["blocking"] }
 zip = "2"
 
 [dependencies]
-vtx-common = { workspace = true, version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

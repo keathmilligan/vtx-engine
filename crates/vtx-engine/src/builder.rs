@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::broadcast;
 use tracing::info;
-use vtx_common::{RecordingMode, TranscriptionProfile, WhisperModel};
+use crate::{RecordingMode, TranscriptionProfile, WhisperModel};
 
 use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
 use crate::transcription;
@@ -240,7 +240,7 @@ impl EngineBuilder {
     ///
     /// Returns `(engine, receiver)` where `receiver` is the first broadcast
     /// receiver. Call [`AudioEngine::subscribe`] to obtain additional receivers.
-    pub async fn build(self) -> Result<(AudioEngine, broadcast::Receiver<vtx_common::EngineEvent>), String> {
+    pub async fn build(self) -> Result<(AudioEngine, broadcast::Receiver<crate::EngineEvent>), String> {
         info!("Initializing audio backend...");
         crate::platform::init_audio_backend()?;
 

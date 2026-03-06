@@ -15,7 +15,7 @@ use directories::ProjectDirs;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 use uuid::Uuid;
-use vtx_common::{EngineEvent, HistoryEntry};
+use crate::{EngineEvent, HistoryEntry};
 
 const HISTORY_FILENAME: &str = "history.ndjson";
 

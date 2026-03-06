@@ -5051,14 +5051,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vtx-common"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "vtx-demo"
 version = "0.1.0"
 dependencies = [
@@ -5070,7 +5062,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vtx-common",
  "vtx-engine",
 ]
 
@@ -5101,7 +5092,6 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "uuid",
- "vtx-common",
  "windows 0.58.0",
  "zip",
 ]
