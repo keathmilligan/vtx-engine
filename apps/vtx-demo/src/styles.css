@@ -493,14 +493,7 @@ button#btn-download-model:hover:not(:disabled) {
 }
 
 #transcription-output .result {
-  margin-bottom: 4px;
-  padding: 4px 0;
-  border-bottom: 1px solid var(--border-default);
-}
-
-#transcription-output .result:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
+  padding: 0;
 }
 
 #transcription-output .result .time {
