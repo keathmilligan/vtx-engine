@@ -378,6 +378,12 @@ async function setupBackendListeners() {
     if (isRecording || isPlayingBack) {
       statusText.textContent = isRecording ? "Capturing..." : "Playing...";
     }
+    // In auto-transcription mode, speech-ended means the audio segment was
+    // just split and submitted to the transcription queue.  Mark this moment
+    // on the speech activity visualization.
+    if (autoTranscriptionEnabled) {
+      speechActivityRenderer.markSegmentSubmitted();
+    }
   });
 
   // Model download progress

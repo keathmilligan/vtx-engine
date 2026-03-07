@@ -512,6 +512,14 @@ interface BufferedMetric {
   isWordBreak: boolean;
 }
 
+/** A segment-submission marker stored by ring-buffer write index. */
+interface SegmentMarker {
+  /** The ring-buffer writeIndex at the moment of submission. */
+  ringIndex: number;
+  /** Whether the ring buffer was already full (filled=true) when marked. */
+  wasFilled: boolean;
+}
+
 /**
  * Multi-metric overlay showing speech detection algorithm components:
  * amplitude, ZCR, centroid as line graphs, plus speech state bar.
@@ -538,6 +546,9 @@ export class SpeechActivityRenderer {
 
   private readonly delayBufferSize = 20;
   private delayBuffer: BufferedMetric[] = [];
+
+  /** Circular list of segment-submission markers (ring-buffer indices). */
+  private segmentMarkers: SegmentMarker[] = [];
 
   private readonly leftMargin = 40;
   private readonly rightMargin = 8;
@@ -648,6 +659,28 @@ export class SpeechActivityRenderer {
     return this.isActive;
   }
 
+  /**
+   * Record a segment-submission marker at the current visualization position.
+   * Call this when audio is split and submitted to the transcription queue
+   * (e.g. on the speech-ended event in auto-transcription mode).
+   *
+   * The marker accounts for the delay buffer: frames still pending in the
+   * delay buffer have not yet been committed to the ring buffer, so the
+   * effective "now" position is `writeIndex` (the next slot to be written).
+   * When drawn, this naturally lands at the rightmost visible position of
+   * already-committed data, which is exactly when speech ended.
+   */
+  markSegmentSubmitted(): void {
+    this.segmentMarkers.push({
+      ringIndex: this.writeIndex,
+      wasFilled: this.filled,
+    });
+    // Keep at most bufferSize markers to avoid unbounded growth
+    if (this.segmentMarkers.length > this.bufferSize) {
+      this.segmentMarkers.shift();
+    }
+  }
+
   clear(): void {
     this.amplitudeBuffer.fill(0);
     this.zcrBuffer.fill(0);
@@ -661,6 +694,7 @@ export class SpeechActivityRenderer {
     this.delayBuffer = [];
     this.writeIndex = 0;
     this.filled = false;
+    this.segmentMarkers = [];
     this.drawIdle();
   }
 
@@ -752,6 +786,9 @@ export class SpeechActivityRenderer {
       area,
       cssVar("--vtx-marker-transient", "rgba(239,68,68,0.7)")
     );
+
+    // Segment-submission markers (drawn on top)
+    this.drawSegmentMarkers(area);
   }
 
   private getDrawableArea() {
@@ -885,6 +922,72 @@ export class SpeechActivityRenderer {
         this.ctx.fill();
       }
     }
+  }
+
+  private drawSegmentMarkers(
+    area: { x: number; y: number; width: number; height: number }
+  ): void {
+    if (this.segmentMarkers.length === 0) return;
+
+    const color = cssVar("--vtx-segment-marker", "rgba(255,255,255,0.85)");
+
+    // Determine the range of ring-buffer slots currently visible.
+    // getSamplesInOrder() returns samples in chronological order from oldest
+    // to newest, spanning bufferSize slots.  The rightmost pixel corresponds
+    // to the slot just before writeIndex (i.e. writeIndex - 1 mod bufferSize),
+    // and the leftmost pixel corresponds to writeIndex (when filled) or slot 0
+    // (when not yet filled).
+    //
+    // To convert a stored marker ringIndex to an X pixel:
+    //   visibleLength = filled ? bufferSize : writeIndex
+    //   slotAge = (writeIndex - markerRingIndex + bufferSize) % bufferSize
+    //   if slotAge > visibleLength => marker has scrolled off left edge
+    //   normalizedPos = (visibleLength - slotAge) / bufferSize
+    //   x = area.x + normalizedPos * area.width
+    const visibleLength = this.filled ? this.bufferSize : this.writeIndex;
+
+    const markersToKeep: SegmentMarker[] = [];
+
+    for (const marker of this.segmentMarkers) {
+      const slotAge =
+        (this.writeIndex - marker.ringIndex + this.bufferSize) %
+        this.bufferSize;
+
+      // Discard markers that have scrolled completely off the left edge
+      if (slotAge > visibleLength) continue;
+
+      markersToKeep.push(marker);
+
+      const normalizedPos = (visibleLength - slotAge) / this.bufferSize;
+      const x = area.x + normalizedPos * area.width;
+
+      // Full-height vertical dashed line
+      this.ctx.save();
+      this.ctx.strokeStyle = color;
+      this.ctx.lineWidth = 1.5;
+      this.ctx.setLineDash([4, 3]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(x, area.y);
+      this.ctx.lineTo(x, area.y + area.height);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+      this.ctx.restore();
+
+      // Small downward-pointing triangle at the top to indicate "submitted"
+      const triSize = 5;
+      this.ctx.save();
+      this.ctx.fillStyle = color;
+      this.ctx.beginPath();
+      this.ctx.moveTo(x - triSize, area.y);
+      this.ctx.lineTo(x + triSize, area.y);
+      this.ctx.lineTo(x, area.y + triSize * 1.4);
+      this.ctx.closePath();
+      this.ctx.fill();
+      this.ctx.restore();
+    }
+
+    // Prune markers that have scrolled off
+    this.segmentMarkers = markersToKeep;
   }
 
   private drawGrid(width: number, height: number): void {
