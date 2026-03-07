@@ -552,6 +552,34 @@ impl AudioEngine {
         let backend = platform::get_backend()
             .ok_or_else(|| "Audio backend not initialized".to_string())?;
 
+        // When echo cancellation is requested, source2 must be a system audio
+        // device (loopback/render endpoint).  AEC requires a render reference:
+        // if source2 is a microphone/input device the render buffer is never
+        // filled and AEC will suppress the primary mic signal entirely.
+        if self.config.recording_mode == RecordingMode::EchoCancel {
+            if let Some(ref id) = source2_id {
+                let system_ids: std::collections::HashSet<String> = backend
+                    .list_system_devices()
+                    .into_iter()
+                    .map(|d| d.id)
+                    .collect();
+                if !system_ids.contains(id) {
+                    return Err(format!(
+                        "Echo cancellation requires source2 to be a system audio (loopback) \
+                         device, but '{}' is an input device. Select a system audio device as \
+                         the secondary source when echo cancellation is enabled.",
+                        id
+                    ));
+                }
+            } else {
+                return Err(
+                    "Echo cancellation requires a secondary system audio (loopback) source. \
+                     Provide a system audio device as source2."
+                        .to_string(),
+                );
+            }
+        }
+
         // Consolidate AEC into recording_mode — EchoCancel implies AEC enabled
         backend.set_aec_enabled(self.config.recording_mode == RecordingMode::EchoCancel);
         backend.set_recording_mode(self.config.recording_mode);

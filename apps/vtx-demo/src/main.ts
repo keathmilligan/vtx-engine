@@ -51,6 +51,7 @@ const SETTINGS_KEY = "vtx-demo-settings";
 
 /** Mirror of the Rust EngineConfig struct (snake_case matches serde output). */
 interface EngineConfig {
+  recording_mode: "mixed" | "echo_cancel";
   mic_gain_db: number;
   vad_voiced_threshold_db: number;
   vad_whisper_threshold_db: number;
@@ -261,6 +262,15 @@ async function syncTogglesToBackend() {
     await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled });
   } catch (e) {
     console.error("Failed to sync PTT mode:", e);
+  }
+  try {
+    // Sync AEC / recording_mode — fetch current config and update only that field
+    // so other config values (model, thresholds, etc.) are preserved.
+    const cfg = await invoke<EngineConfig>("get_engine_config");
+    cfg.recording_mode = aecEnabled ? "echo_cancel" : "mixed";
+    await invoke("set_engine_config", { config: cfg });
+  } catch (e) {
+    console.error("Failed to sync recording_mode:", e);
   }
 }
 
@@ -794,6 +804,17 @@ async function onAutoTranscriptionToggle() {
 function onAecToggle() {
   aecEnabled = aecToggle.checked;
   saveSettings(getCurrentSettings());
+  // Persist the recording mode to the engine so it takes effect on the next
+  // start_capture call. Fetch the current config to avoid clobbering other
+  // settings, then update only recording_mode.
+  invoke<EngineConfig>("get_engine_config")
+    .then((cfg) => {
+      cfg.recording_mode = aecEnabled ? "echo_cancel" : "mixed";
+      return invoke("set_engine_config", { config: cfg });
+    })
+    .catch((e) => {
+      console.error("Failed to update recording_mode:", e);
+    });
 }
 
 // =============================================================================
@@ -883,6 +904,10 @@ function populateConfigForm(cfg: EngineConfig): void {
 /** Read form fields and build an EngineConfig object. */
 function readConfigForm(): EngineConfig {
   return {
+    // recording_mode is controlled by the AEC toggle on the main UI, not the
+    // config panel. Derive it from the current aecEnabled state so saving the
+    // config panel never accidentally resets it.
+    recording_mode: aecEnabled ? "echo_cancel" : "mixed",
     mic_gain_db: parseFloat(cfgMicGain.value),
     vad_voiced_threshold_db: parseFloat(cfgVadVoicedThreshold.value),
     vad_whisper_threshold_db: parseFloat(cfgVadWhisperThreshold.value),
@@ -1051,6 +1076,7 @@ function resetToDefaults(): void {
 /** Convert AppSettings (camelCase) to EngineConfig (snake_case). */
 function settingsToEngineConfig(s: AppSettings): EngineConfig {
   return {
+    recording_mode: s.aecEnabled ? "echo_cancel" : "mixed",
     mic_gain_db: s.micGainDb,
     vad_voiced_threshold_db: s.vadVoicedThresholdDb,
     vad_whisper_threshold_db: s.vadWhisperThresholdDb,

@@ -455,11 +455,23 @@ impl AudioMixer {
 
         let frame_size = AEC_FRAME_SAMPLES * self.channels as usize;
 
-        // Process capture frames when we have enough data from both sources
-        while self.capture_buffer.len() >= frame_size && self.render_mix_buffer.len() >= frame_size
+        // In EchoCancel mode the render frame is not mixed into the output, so
+        // we don't need to wait for render_mix_buffer to fill before processing
+        // capture frames — doing so would stall mic output whenever system audio
+        // is delayed or scarce.
+        while self.capture_buffer.len() >= frame_size
+            && (recording_mode == RecordingMode::EchoCancel
+                || self.render_mix_buffer.len() >= frame_size)
         {
             let capture_frame: Vec<f32> = self.capture_buffer.drain(0..frame_size).collect();
-            let render_frame: Vec<f32> = self.render_mix_buffer.drain(0..frame_size).collect();
+            // Only drain render_mix_buffer when it's needed for mixing.
+            let render_frame: Vec<f32> = if recording_mode == RecordingMode::Mixed
+                && self.render_mix_buffer.len() >= frame_size
+            {
+                self.render_mix_buffer.drain(0..frame_size).collect()
+            } else {
+                vec![0.0f32; frame_size]
+            };
 
             // Apply AEC if enabled
             let processed_capture = if aec_enabled {
