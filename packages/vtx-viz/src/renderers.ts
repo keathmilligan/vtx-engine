@@ -749,41 +749,60 @@ export class SpeechActivityRenderer {
 
     if (amplitudes.length === 0) return;
 
-    // Speech bar
+    // Speech bar (top)
+    const speechBarHeight = area.height * 0.08;
     this.drawSpeechBar(speaking, lookback, area);
-    this.drawWordBreakBars(wordBreaks, speaking, area);
+
+    // Word break indicator bar (just below speaking bar)
+    const wordBreakBarHeight = area.height * 0.08;
+    const wordBreakArea = {
+      x: area.x,
+      y: area.y + speechBarHeight,
+      width: area.width,
+      height: wordBreakBarHeight,
+    };
+    this.drawWordBreakBars(wordBreaks, speaking, wordBreakArea);
+
+    // Metric lines and state markers use the area below both bars
+    const barsHeight = speechBarHeight + wordBreakBarHeight;
+    const metricsArea = {
+      x: area.x,
+      y: area.y + barsHeight,
+      width: area.width,
+      height: area.height - barsHeight,
+    };
 
     // Metric lines
     this.drawMetricLine(
       amplitudes,
-      area,
+      metricsArea,
       cssVar("--vtx-metric-amplitude", "rgba(245,158,11,0.75)")
     );
     this.drawMetricLine(
       zcrs,
-      area,
+      metricsArea,
       cssVar("--vtx-metric-zcr", "rgba(6,182,212,0.75)")
     );
     this.drawMetricLine(
       centroids,
-      area,
+      metricsArea,
       cssVar("--vtx-metric-centroid", "rgba(217,70,239,0.75)")
     );
 
     // State markers
     this.drawStateMarkers(
       voiced,
-      area,
+      metricsArea,
       cssVar("--vtx-marker-voiced", "rgba(34,197,94,0.7)")
     );
     this.drawStateMarkers(
       whisper,
-      area,
+      metricsArea,
       cssVar("--vtx-marker-whisper", "rgba(59,130,246,0.7)")
     );
     this.drawStateMarkers(
       transients,
-      area,
+      metricsArea,
       cssVar("--vtx-marker-transient", "rgba(239,68,68,0.7)")
     );
 
@@ -808,7 +827,7 @@ export class SpeechActivityRenderer {
     lookback: Uint8Array,
     area: { x: number; y: number; width: number; height: number }
   ): void {
-    const barHeight = area.height * 0.15;
+    const barHeight = area.height * 0.08;
     const offset = this.bufferSize - speaking.length;
     const confirmed = cssVar(
       "--vtx-speech-confirmed",
@@ -859,7 +878,7 @@ export class SpeechActivityRenderer {
     speaking: Uint8Array,
     area: { x: number; y: number; width: number; height: number }
   ): void {
-    const barHeight = area.height * 0.15;
+    const barHeight = area.height;
     const offset = this.bufferSize - wordBreaks.length;
     this.ctx.strokeStyle = cssVar(
       "--vtx-speech-word-break",
