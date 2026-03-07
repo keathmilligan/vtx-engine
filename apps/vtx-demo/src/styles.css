@@ -360,7 +360,7 @@ button#btn-download-model:hover:not(:disabled) {
 }
 
 .speech-activity-wrapper {
-  flex: 0.5;
+  flex: 0.8;
 }
 
 .panel-label {
@@ -442,7 +442,7 @@ button#btn-download-model:hover:not(:disabled) {
   border: 1px solid var(--border-default);
   border-radius: 6px;
   padding: 12px;
-  height: 150px;
+  height: 90px;
   overflow-y: auto;
   font-size: 14px;
   line-height: 1.5;
