@@ -49,12 +49,40 @@ interface TranscriptionSegment {
 
 const SETTINGS_KEY = "vtx-demo-settings";
 
+/** Mirror of the Rust EngineConfig struct (snake_case matches serde output). */
+interface EngineConfig {
+  mic_gain_db: number;
+  vad_voiced_threshold_db: number;
+  vad_whisper_threshold_db: number;
+  vad_voiced_onset_ms: number;
+  vad_whisper_onset_ms: number;
+  segment_max_duration_ms: number;
+  segment_word_break_grace_ms: number;
+  segment_lookback_ms: number;
+  transcription_queue_capacity: number;
+  viz_frame_interval_ms: number;
+  word_break_segmentation_enabled: boolean;
+}
+
 interface AppSettings {
   transcriptionEnabled: boolean;
   autoTranscriptionEnabled: boolean;
   aecEnabled: boolean;
   primaryDeviceId: string;
   secondaryDeviceId: string;
+  // Engine config fields (persisted as camelCase in localStorage)
+  micGainDb: number;
+  vadVoicedThresholdDb: number;
+  vadWhisperThresholdDb: number;
+  vadVoicedOnsetMs: number;
+  vadWhisperOnsetMs: number;
+  segmentMaxDurationMs: number;
+  segmentWordBreakGraceMs: number;
+  segmentLookbackMs: number;
+  transcriptionQueueCapacity: number;
+  vizFrameIntervalMs: number;
+  wordBreakSegmentationEnabled: boolean;
+  audioOutputDeviceId: string;
 }
 
 function loadSettings(): AppSettings {
@@ -76,6 +104,19 @@ function defaultSettings(): AppSettings {
     aecEnabled: false,
     primaryDeviceId: "",
     secondaryDeviceId: "",
+    // Engine config defaults (must match Rust EngineConfig defaults)
+    micGainDb: 0.0,
+    vadVoicedThresholdDb: -42.0,
+    vadWhisperThresholdDb: -52.0,
+    vadVoicedOnsetMs: 80,
+    vadWhisperOnsetMs: 120,
+    segmentMaxDurationMs: 4000,
+    segmentWordBreakGraceMs: 750,
+    segmentLookbackMs: 200,
+    transcriptionQueueCapacity: 8,
+    vizFrameIntervalMs: 16,
+    wordBreakSegmentationEnabled: true,
+    audioOutputDeviceId: "",
   };
 }
 
@@ -88,7 +129,11 @@ function saveSettings(settings: AppSettings): void {
 }
 
 function getCurrentSettings(): AppSettings {
+  // Merge with persisted settings so engine config fields are not lost
+  // when saving only the toggle/device state.
+  const persisted = loadSettings();
   return {
+    ...persisted,
     transcriptionEnabled,
     autoTranscriptionEnabled,
     aecEnabled,
@@ -259,6 +304,9 @@ function setupEventListeners() {
   // Save device selections on change
   deviceSelect.addEventListener("change", () => saveSettings(getCurrentSettings()));
   deviceSelect2.addEventListener("change", () => saveSettings(getCurrentSettings()));
+
+  // Configuration panel
+  setupConfigPanelListeners();
 }
 
 async function setupBackendListeners() {
@@ -459,6 +507,9 @@ async function startRecording() {
       source2Id: source2Id,
       aecEnabled: aecEnabled,
     });
+    // Begin accumulating a manual recording buffer so the session is saved
+    // as a single WAV and can be reprocessed after stopping.
+    await invoke("start_recording");
     isRecording = true;
     btnCapture.textContent = "Stop";
     btnCapture.classList.add("recording");
@@ -468,6 +519,12 @@ async function startRecording() {
     autoTranscriptionToggle.disabled = true;
     btnReprocess.disabled = true;
     statusText.textContent = "Capturing...";
+
+    // Reset visualization and transcription output for the new session
+    waveformRenderer.clear();
+    spectrogramRenderer.clear();
+    speechActivityRenderer.clear();
+    clearTranscriptionOutput();
 
     // Start renderers
     waveformRenderer.start();
@@ -542,9 +599,23 @@ async function startFilePlayback(filePath: string) {
   setPlayingBack(true);
   statusText.textContent = "Playing...";
 
-  // Play audio through the default output device via HTMLAudioElement.
+  // Play audio through the configured output device via HTMLAudioElement.
   const audioUrl = convertFileSrc(filePath);
   playbackAudio = new Audio(audioUrl);
+
+  // Apply saved output device selection (task 8.9)
+  const sinkIdSupported = typeof (HTMLMediaElement.prototype as any).setSinkId === "function";
+  if (sinkIdSupported) {
+    const savedOutputId = loadSettings().audioOutputDeviceId;
+    if (savedOutputId) {
+      try {
+        await (playbackAudio as any).setSinkId(savedOutputId);
+      } catch (e) {
+        console.warn("setSinkId failed on playback start:", e);
+      }
+    }
+  }
+
   playbackAudio.play().catch((e) => {
     console.error("Audio element playback failed:", e);
   });
@@ -738,6 +809,262 @@ function addTranscriptionResult(result: TranscriptionSegment) {
 
   // Scroll to bottom
   transcriptionOutput.scrollTop = transcriptionOutput.scrollHeight;
+}
+
+// =============================================================================
+// Configuration Panel
+// =============================================================================
+
+// DOM refs — config modal elements
+const btnConfig = document.getElementById("btn-config") as HTMLButtonElement;
+const configBackdrop = document.getElementById("config-backdrop") as HTMLDivElement;
+const btnConfigClose = document.getElementById("btn-config-close") as HTMLButtonElement;
+const btnConfigSave = document.getElementById("btn-config-save") as HTMLButtonElement;
+const btnConfigReset = document.getElementById("btn-config-reset") as HTMLButtonElement;
+const configCaptureWarning = document.getElementById("config-capture-warning") as HTMLDivElement;
+
+// Audio Input
+const cfgMicGain = document.getElementById("cfg-mic-gain") as HTMLInputElement;
+const cfgMicGainDisplay = document.getElementById("cfg-mic-gain-display") as HTMLSpanElement;
+
+// Voice Detection
+const cfgVadVoicedThreshold = document.getElementById("cfg-vad-voiced-threshold") as HTMLInputElement;
+const cfgVadWhisperThreshold = document.getElementById("cfg-vad-whisper-threshold") as HTMLInputElement;
+const cfgVadVoicedOnset = document.getElementById("cfg-vad-voiced-onset") as HTMLInputElement;
+const cfgVadWhisperOnset = document.getElementById("cfg-vad-whisper-onset") as HTMLInputElement;
+
+// Segmentation
+const cfgSegmentMaxDuration = document.getElementById("cfg-segment-max-duration") as HTMLInputElement;
+const cfgSegmentGrace = document.getElementById("cfg-segment-grace") as HTMLInputElement;
+const cfgSegmentLookback = document.getElementById("cfg-segment-lookback") as HTMLInputElement;
+const cfgWordBreakSegmentation = document.getElementById("cfg-word-break-segmentation") as HTMLInputElement;
+const cfgQueueCapacity = document.getElementById("cfg-queue-capacity") as HTMLInputElement;
+
+// Visualization
+const cfgVizFrameInterval = document.getElementById("cfg-viz-frame-interval") as HTMLInputElement;
+
+// Audio Output
+const cfgOutputDevice = document.getElementById("cfg-output-device") as HTMLSelectElement;
+const cfgOutputSupported = document.getElementById("cfg-output-supported") as HTMLDivElement;
+const cfgOutputUnsupported = document.getElementById("cfg-output-unsupported") as HTMLDivElement;
+
+/** Populate form fields from an EngineConfig object. */
+function populateConfigForm(cfg: EngineConfig): void {
+  cfgMicGain.value = String(cfg.mic_gain_db);
+  updateGainDisplay(cfg.mic_gain_db);
+  cfgVadVoicedThreshold.value = String(cfg.vad_voiced_threshold_db);
+  cfgVadWhisperThreshold.value = String(cfg.vad_whisper_threshold_db);
+  cfgVadVoicedOnset.value = String(cfg.vad_voiced_onset_ms);
+  cfgVadWhisperOnset.value = String(cfg.vad_whisper_onset_ms);
+  cfgSegmentMaxDuration.value = String(cfg.segment_max_duration_ms);
+  cfgSegmentGrace.value = String(cfg.segment_word_break_grace_ms);
+  cfgSegmentLookback.value = String(cfg.segment_lookback_ms);
+  cfgWordBreakSegmentation.checked = cfg.word_break_segmentation_enabled;
+  cfgQueueCapacity.value = String(cfg.transcription_queue_capacity);
+  cfgVizFrameInterval.value = String(cfg.viz_frame_interval_ms);
+}
+
+/** Read form fields and build an EngineConfig object. */
+function readConfigForm(): EngineConfig {
+  return {
+    mic_gain_db: parseFloat(cfgMicGain.value),
+    vad_voiced_threshold_db: parseFloat(cfgVadVoicedThreshold.value),
+    vad_whisper_threshold_db: parseFloat(cfgVadWhisperThreshold.value),
+    vad_voiced_onset_ms: parseInt(cfgVadVoicedOnset.value, 10),
+    vad_whisper_onset_ms: parseInt(cfgVadWhisperOnset.value, 10),
+    segment_max_duration_ms: parseInt(cfgSegmentMaxDuration.value, 10),
+    segment_word_break_grace_ms: parseInt(cfgSegmentGrace.value, 10),
+    segment_lookback_ms: parseInt(cfgSegmentLookback.value, 10),
+    transcription_queue_capacity: parseInt(cfgQueueCapacity.value, 10),
+    viz_frame_interval_ms: parseInt(cfgVizFrameInterval.value, 10),
+    word_break_segmentation_enabled: cfgWordBreakSegmentation.checked,
+  };
+}
+
+/** Update the live dB readout next to the mic gain slider (task 9.1). */
+function updateGainDisplay(db: number): void {
+  const sign = db > 0 ? "+" : "";
+  cfgMicGainDisplay.textContent = `${sign}${db.toFixed(1)} dB`;
+}
+
+/** Populate the output device selector from the browser's device list. */
+async function populateOutputDevices(savedId: string): Promise<void> {
+  const sinkIdSupported = typeof (HTMLMediaElement.prototype as any).setSinkId === "function";
+  if (!sinkIdSupported) {
+    cfgOutputSupported.style.display = "none";
+    cfgOutputUnsupported.style.display = "";
+    return;
+  }
+  cfgOutputSupported.style.display = "";
+  cfgOutputUnsupported.style.display = "none";
+
+  try {
+    // enumerateDevices() only returns full device labels after a getUserMedia
+    // grant. Request a brief mic stream to obtain the permission token, then
+    // immediately stop it so no audio is captured.
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream.getTracks().forEach((t) => t.stop());
+    } catch {
+      // Permission denied or no mic — labels may still be generic, proceed anyway.
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputDevices = devices.filter((d) => d.kind === "audiooutput");
+
+    cfgOutputDevice.innerHTML = "";
+    const defaultOpt = document.createElement("option");
+    defaultOpt.value = "";
+    defaultOpt.textContent = "Default";
+    cfgOutputDevice.appendChild(defaultOpt);
+
+    for (const dev of outputDevices) {
+      const opt = document.createElement("option");
+      opt.value = dev.deviceId;
+      opt.textContent = dev.label || `Output ${dev.deviceId.substring(0, 8)}`;
+      cfgOutputDevice.appendChild(opt);
+    }
+
+    // Restore saved selection if it still exists
+    if (savedId && Array.from(cfgOutputDevice.options).some((o) => o.value === savedId)) {
+      cfgOutputDevice.value = savedId;
+    }
+  } catch (e) {
+    console.error("Failed to enumerate output devices:", e);
+  }
+}
+
+let escapeListener: ((e: KeyboardEvent) => void) | null = null;
+
+/** Open the configuration panel. */
+async function openConfigPanel(): Promise<void> {
+  // Fetch current config from backend
+  try {
+    const cfg = await invoke<EngineConfig>("get_engine_config");
+    populateConfigForm(cfg);
+  } catch (e) {
+    console.error("Failed to get engine config:", e);
+    // Fall back to saved settings
+    const s = loadSettings();
+    populateConfigForm(settingsToEngineConfig(s));
+  }
+
+  // Populate output devices
+  const savedSettings = loadSettings();
+  await populateOutputDevices(savedSettings.audioOutputDeviceId);
+
+  // Show capture warning if active
+  configCaptureWarning.style.display = isRecording ? "" : "none";
+
+  // Show modal
+  configBackdrop.style.display = "flex";
+  configBackdrop.removeAttribute("aria-hidden");
+
+  // Escape to close
+  escapeListener = (e: KeyboardEvent) => {
+    if (e.key === "Escape") closeConfigPanel();
+  };
+  document.addEventListener("keydown", escapeListener);
+
+  // Focus the close button for accessibility
+  btnConfigClose.focus();
+}
+
+/** Close the configuration panel. */
+function closeConfigPanel(): void {
+  configBackdrop.style.display = "none";
+  configBackdrop.setAttribute("aria-hidden", "true");
+  if (escapeListener) {
+    document.removeEventListener("keydown", escapeListener);
+    escapeListener = null;
+  }
+  btnConfig.focus();
+}
+
+/** Save the current form values, apply to backend, and close. */
+async function saveConfig(): Promise<void> {
+  const cfg = readConfigForm();
+
+  try {
+    await invoke("set_engine_config", { config: cfg });
+  } catch (e) {
+    console.error("Failed to set engine config:", e);
+  }
+
+  // Apply output device selection via setSinkId
+  const sinkIdSupported = typeof (HTMLMediaElement.prototype as any).setSinkId === "function";
+  const selectedOutputId = cfgOutputDevice.value;
+  if (sinkIdSupported && playbackAudio) {
+    try {
+      await (playbackAudio as any).setSinkId(selectedOutputId);
+    } catch (e) {
+      console.warn("setSinkId failed:", e);
+    }
+  }
+
+  // Persist to localStorage
+  const s = loadSettings();
+  const updated: AppSettings = {
+    ...s,
+    micGainDb: cfg.mic_gain_db,
+    vadVoicedThresholdDb: cfg.vad_voiced_threshold_db,
+    vadWhisperThresholdDb: cfg.vad_whisper_threshold_db,
+    vadVoicedOnsetMs: cfg.vad_voiced_onset_ms,
+    vadWhisperOnsetMs: cfg.vad_whisper_onset_ms,
+    segmentMaxDurationMs: cfg.segment_max_duration_ms,
+    segmentWordBreakGraceMs: cfg.segment_word_break_grace_ms,
+    segmentLookbackMs: cfg.segment_lookback_ms,
+    transcriptionQueueCapacity: cfg.transcription_queue_capacity,
+    vizFrameIntervalMs: cfg.viz_frame_interval_ms,
+    wordBreakSegmentationEnabled: cfg.word_break_segmentation_enabled,
+    audioOutputDeviceId: selectedOutputId,
+  };
+  saveSettings(updated);
+
+  closeConfigPanel();
+}
+
+/** Reset all form fields to factory defaults without saving. */
+function resetToDefaults(): void {
+  const d = defaultSettings();
+  populateConfigForm(settingsToEngineConfig(d));
+  // Also reset output device selector to default
+  cfgOutputDevice.value = "";
+}
+
+/** Convert AppSettings (camelCase) to EngineConfig (snake_case). */
+function settingsToEngineConfig(s: AppSettings): EngineConfig {
+  return {
+    mic_gain_db: s.micGainDb,
+    vad_voiced_threshold_db: s.vadVoicedThresholdDb,
+    vad_whisper_threshold_db: s.vadWhisperThresholdDb,
+    vad_voiced_onset_ms: s.vadVoicedOnsetMs,
+    vad_whisper_onset_ms: s.vadWhisperOnsetMs,
+    segment_max_duration_ms: s.segmentMaxDurationMs,
+    segment_word_break_grace_ms: s.segmentWordBreakGraceMs,
+    segment_lookback_ms: s.segmentLookbackMs,
+    transcription_queue_capacity: s.transcriptionQueueCapacity,
+    viz_frame_interval_ms: s.vizFrameIntervalMs,
+    word_break_segmentation_enabled: s.wordBreakSegmentationEnabled,
+  };
+}
+
+/** Wire up config panel event listeners. */
+function setupConfigPanelListeners(): void {
+  btnConfig.addEventListener("click", openConfigPanel);
+  btnConfigClose.addEventListener("click", closeConfigPanel);
+  btnConfigSave.addEventListener("click", saveConfig);
+  btnConfigReset.addEventListener("click", resetToDefaults);
+
+  // Backdrop click closes panel (only when clicking the backdrop itself)
+  configBackdrop.addEventListener("click", (e) => {
+    if (e.target === configBackdrop) closeConfigPanel();
+  });
+
+  // Live dB readout on slider input (task 9.1)
+  cfgMicGain.addEventListener("input", () => {
+    updateGainDisplay(parseFloat(cfgMicGain.value));
+  });
 }
 
 // =============================================================================

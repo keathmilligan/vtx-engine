@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use tokio::sync::broadcast;
 use tracing::info;
@@ -308,6 +308,7 @@ impl EngineBuilder {
         }));
         let transcribe_state = Arc::new(std::sync::Mutex::new(ts));
 
+        let initial_mic_gain_bits = self.config.mic_gain_db.to_bits();
         let engine = AudioEngine {
             config: self.config,
             sender,
@@ -324,6 +325,7 @@ impl EngineBuilder {
             last_recording_path,
             playback_tx: Arc::new(std::sync::Mutex::new(None)),
             playback_active: Arc::new(AtomicBool::new(false)),
+            mic_gain_db: Arc::new(AtomicU32::new(initial_mic_gain_bits)),
         };
 
         Ok((engine, receiver))

@@ -172,6 +172,24 @@ async fn is_recording(state: tauri::State<'_, AppState>) -> Result<bool, String>
     Ok(engine.is_recording())
 }
 
+#[tauri::command]
+async fn get_engine_config(state: tauri::State<'_, AppState>) -> Result<vtx_engine::EngineConfig, String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    Ok(engine.config().clone())
+}
+
+#[tauri::command]
+async fn set_engine_config(
+    state: tauri::State<'_, AppState>,
+    config: vtx_engine::EngineConfig,
+) -> Result<(), String> {
+    let mut engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_mut().ok_or("Engine not initialized")?;
+    engine.set_config(config);
+    Ok(())
+}
+
 // =============================================================================
 // App Entry Point
 // =============================================================================
@@ -287,6 +305,8 @@ pub fn run() {
             open_file,
             reprocess_file,
             stop_playback,
+            get_engine_config,
+            set_engine_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

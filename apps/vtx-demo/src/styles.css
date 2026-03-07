@@ -511,3 +511,279 @@ button#btn-download-model:hover:not(:disabled) {
   background: var(--btn-primary-bg);
   transition: width 0.2s;
 }
+
+/* =============================================================================
+   Configuration Modal
+   ============================================================================= */
+
+/* Gear button in the status bar */
+.config-gear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  padding: 3px 5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.config-gear-btn:hover:not(:disabled) {
+  background: var(--surface-input);
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.config-gear-btn:focus-visible {
+  outline: 2px solid var(--btn-primary-bg);
+  outline-offset: 2px;
+}
+
+/* Backdrop */
+.config-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+/* Modal panel */
+.config-modal {
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  width: min(520px, 95vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+/* Header */
+.config-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.config-modal-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.config-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.config-close-btn:hover:not(:disabled) {
+  background: var(--surface-input);
+  color: var(--text-primary);
+}
+
+/* Capture-active warning banner */
+.config-capture-warning {
+  margin: 10px 20px 0;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+/* Scrollable body */
+.config-modal-body {
+  overflow-y: auto;
+  padding: 12px 20px;
+  flex: 1;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-hover) transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-modal-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.config-modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.config-modal-body::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+
+/* Config sections */
+.config-section {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.config-section:last-child {
+  border-bottom: none;
+}
+
+.config-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+/* Individual fields */
+.config-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.config-field label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 180px;
+}
+
+.config-field input[type="number"],
+.config-field select {
+  width: 120px;
+  flex-shrink: 0;
+  text-align: right;
+  padding: 4px 8px;
+  font-size: 13px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+}
+
+.config-field input[type="number"]:focus,
+.config-field select:focus {
+  outline: none;
+  border-color: var(--btn-primary-bg);
+}
+
+/* Inline checkbox field (word-break segmentation) */
+.config-field-inline {
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.config-field-inline label {
+  min-width: unset;
+  flex: 1;
+}
+
+.config-field-inline input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--btn-primary-bg);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Slider row */
+.config-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.config-field input[type="range"] {
+  width: 100px;
+  flex-shrink: 0;
+  accent-color: var(--btn-primary-bg);
+  cursor: pointer;
+}
+
+.config-slider-display {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 54px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Note text (e.g., unsupported platform) */
+.config-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* Footer */
+.config-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.config-btn-primary {
+  background: var(--btn-primary-bg);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.config-btn-primary:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+}
+
+.config-btn-secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.config-btn-secondary:hover:not(:disabled) {
+  background: var(--surface-input);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}

@@ -15,6 +15,12 @@
         <span id="model-status"></span>
         <span id="gpu-status" class="status-badge"></span>
         <span id="model-name" class="status-badge"></span>
+        <button id="btn-config" class="config-gear-btn" title="Configuration" aria-label="Open configuration">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -115,6 +121,110 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <!-- Configuration Modal -->
+  <div id="config-backdrop" class="config-backdrop" style="display:none" aria-hidden="true">
+    <div id="config-modal" class="config-modal" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+      <div class="config-modal-header">
+        <h2 id="config-modal-title">Configuration</h2>
+        <button id="btn-config-close" class="config-close-btn" aria-label="Close configuration">&times;</button>
+      </div>
+
+      <div id="config-capture-warning" class="config-capture-warning" style="display:none">
+        Changes will take effect on the next capture session.
+      </div>
+
+      <div class="config-modal-body">
+
+        <!-- Audio Input -->
+        <section class="config-section">
+          <h3 class="config-section-title">Audio Input</h3>
+          <div class="config-field">
+            <label for="cfg-mic-gain">Mic Gain</label>
+            <div class="config-slider-row">
+              <input type="range" id="cfg-mic-gain" min="-20" max="20" step="0.5" value="0" />
+              <span id="cfg-mic-gain-display" class="config-slider-display">0.0 dB</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Voice Detection -->
+        <section class="config-section">
+          <h3 class="config-section-title">Voice Detection</h3>
+          <div class="config-field">
+            <label for="cfg-vad-voiced-threshold">Voiced Threshold (dB)</label>
+            <input type="number" id="cfg-vad-voiced-threshold" step="0.5" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-vad-whisper-threshold">Whisper Threshold (dB)</label>
+            <input type="number" id="cfg-vad-whisper-threshold" step="0.5" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-vad-voiced-onset">Voiced Onset (ms)</label>
+            <input type="number" id="cfg-vad-voiced-onset" min="1" step="10" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-vad-whisper-onset">Whisper Onset (ms)</label>
+            <input type="number" id="cfg-vad-whisper-onset" min="1" step="10" />
+          </div>
+        </section>
+
+        <!-- Segmentation -->
+        <section class="config-section">
+          <h3 class="config-section-title">Segmentation</h3>
+          <div class="config-field">
+            <label for="cfg-segment-max-duration">Max Segment Duration (ms)</label>
+            <input type="number" id="cfg-segment-max-duration" min="500" step="500" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-segment-grace">Word-Break Grace Period (ms)</label>
+            <input type="number" id="cfg-segment-grace" min="0" step="50" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-segment-lookback">Lookback (ms)</label>
+            <input type="number" id="cfg-segment-lookback" min="0" step="50" />
+          </div>
+          <div class="config-field config-field-inline">
+            <label for="cfg-word-break-segmentation">Word-Break Segmentation</label>
+            <input type="checkbox" id="cfg-word-break-segmentation" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-queue-capacity">Transcription Queue Capacity</label>
+            <input type="number" id="cfg-queue-capacity" min="1" max="64" step="1" />
+          </div>
+        </section>
+
+        <!-- Visualization -->
+        <section class="config-section">
+          <h3 class="config-section-title">Visualization</h3>
+          <div class="config-field">
+            <label for="cfg-viz-frame-interval">Frame Interval (ms)</label>
+            <input type="number" id="cfg-viz-frame-interval" min="8" max="200" step="1" />
+          </div>
+        </section>
+
+        <!-- Audio Output -->
+        <section class="config-section" id="cfg-output-section">
+          <h3 class="config-section-title">Audio Output</h3>
+          <div id="cfg-output-supported">
+            <div class="config-field">
+              <label for="cfg-output-device">Output Device</label>
+              <select id="cfg-output-device"></select>
+            </div>
+          </div>
+          <div id="cfg-output-unsupported" style="display:none">
+            <p class="config-note">Output device selection is not supported on this platform.</p>
+          </div>
+        </section>
+
+      </div>
+
+      <div class="config-modal-footer">
+        <button id="btn-config-reset" class="config-btn-secondary">Reset to Defaults</button>
+        <button id="btn-config-save" class="config-btn-primary">Save</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.ts"></script>

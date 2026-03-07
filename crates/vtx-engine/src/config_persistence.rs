@@ -76,3 +76,27 @@ fn config_path(app_name: &str) -> Result<std::path::PathBuf, ConfigError> {
     let dirs = ProjectDirs::from("", "", app_name).ok_or(ConfigError::NoProjectDir)?;
     Ok(dirs.config_dir().join(CONFIG_FILENAME))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 1.3: A TOML file without `mic_gain_db` deserializes cleanly and
+    /// produces the default value of 0.0.
+    #[test]
+    fn partial_toml_without_mic_gain_gets_default() {
+        let toml = r#"recording_mode = "echo_cancel""#;
+        let config: EngineConfig = toml::from_str(toml).expect("should parse");
+        assert_eq!(config.mic_gain_db, 0.0);
+    }
+
+    /// Task 1.3 (complementary): A full round-trip preserves mic_gain_db.
+    #[test]
+    fn mic_gain_db_round_trips() {
+        let mut config = EngineConfig::default();
+        config.mic_gain_db = 6.0;
+        let toml_str = toml::to_string_pretty(&config).expect("should serialize");
+        let loaded: EngineConfig = toml::from_str(&toml_str).expect("should deserialize");
+        assert_eq!(loaded.mic_gain_db, 6.0);
+    }
+}

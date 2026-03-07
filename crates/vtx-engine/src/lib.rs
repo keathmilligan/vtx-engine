@@ -37,7 +37,7 @@ pub mod processor;
 pub mod transcription;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -133,6 +133,15 @@ pub struct EngineConfig {
     /// splitting at pauses degrades accuracy.
     #[serde(default = "default_word_break_segmentation_enabled")]
     pub word_break_segmentation_enabled: bool,
+
+    /// Software microphone input gain in dB applied to raw PCM before the
+    /// VAD and transcription pipeline (default 0.0 dB = no change).
+    ///
+    /// The gain is applied as a linear multiplier (`10^(db/20)`) and output
+    /// samples are clamped to `[-1.0, 1.0]` to prevent clipping.
+    /// Recommended range: -20.0 to +20.0 dB.
+    #[serde(default = "default_mic_gain_db")]
+    pub mic_gain_db: f32,
 }
 
 fn default_vad_voiced_threshold_db() -> f32 { -42.0 }
@@ -145,6 +154,7 @@ fn default_segment_lookback_ms() -> u64 { 200 }
 fn default_transcription_queue_capacity() -> usize { 8 }
 fn default_viz_frame_interval_ms() -> u64 { 16 }
 fn default_word_break_segmentation_enabled() -> bool { true }
+fn default_mic_gain_db() -> f32 { 0.0 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
@@ -163,6 +173,7 @@ impl Default for EngineConfig {
             transcription_queue_capacity: default_transcription_queue_capacity(),
             viz_frame_interval_ms: default_viz_frame_interval_ms(),
             word_break_segmentation_enabled: default_word_break_segmentation_enabled(),
+            mic_gain_db: default_mic_gain_db(),
         }
     }
 }
@@ -252,6 +263,8 @@ pub struct AudioEngine {
     playback_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<AudioData>>>>,
     /// Flag set while a file is being played back through the injection channel.
     playback_active: Arc<AtomicBool>,
+    /// Mic gain in dB stored as f32 bits in an AtomicU32 for lock-free hot-update.
+    mic_gain_db: Arc<AtomicU32>,
 }
 
 impl AudioEngine {
@@ -566,6 +579,7 @@ impl AudioEngine {
         let visualization_enabled = self.visualization_enabled;
         let recording_active = self.recording_active.clone();
         let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
+        let mic_gain_db_atomic = self.mic_gain_db.clone();
 
         loop_active.store(true, Ordering::SeqCst);
 
@@ -588,7 +602,16 @@ impl AudioEngine {
                     .or_else(|| inject_rx.try_recv().ok());
 
                 if let Some(data) = audio_data {
-                    let mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+                    let mut mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+
+                    // --- Software mic gain ---
+                    let gain_db = f32::from_bits(mic_gain_db_atomic.load(Ordering::Relaxed));
+                    if gain_db != 0.0 {
+                        let linear = 10f32.powf(gain_db / 20.0);
+                        for s in mono_samples.iter_mut() {
+                            *s = (*s * linear).clamp(-1.0, 1.0);
+                        }
+                    }
 
                     // --- VAD ---
                     if vad_enabled {
@@ -694,6 +717,42 @@ impl AudioEngine {
     /// Check if audio capture is currently active.
     pub fn is_capturing(&self) -> bool {
         self.audio_loop_active.load(Ordering::SeqCst)
+    }
+
+    /// Set the microphone input gain in dB.
+    ///
+    /// Takes effect immediately on the next audio buffer processed in the
+    /// capture loop. Also calls [`AudioBackend::set_gain`] so platform
+    /// backends may apply hardware gain if they choose to implement it.
+    ///
+    /// A value of `0.0` means no change (linear multiplier of 1.0).
+    /// Recommended range: -20.0 to +20.0 dB.
+    pub fn set_mic_gain(&self, db: f32) {
+        self.mic_gain_db.store(db.to_bits(), Ordering::Relaxed);
+        if let Some(backend) = platform::get_backend() {
+            backend.set_gain(db);
+        }
+    }
+
+    /// Get the current microphone input gain in dB.
+    pub fn mic_gain_db(&self) -> f32 {
+        f32::from_bits(self.mic_gain_db.load(Ordering::Relaxed))
+    }
+
+    /// Get the current engine configuration.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Update the engine configuration.
+    ///
+    /// The new configuration takes effect on the next `start_capture` call,
+    /// except for `mic_gain_db` which is applied immediately via
+    /// [`set_mic_gain`](Self::set_mic_gain).
+    pub fn set_config(&mut self, config: EngineConfig) {
+        let gain = config.mic_gain_db;
+        self.config = config;
+        self.set_mic_gain(gain);
     }
 
     /// Check if the Whisper model is available.
@@ -1063,5 +1122,41 @@ impl transcription::TranscriptionCallback for EngineTranscriptionCallback {
 
     fn on_queue_update(&self, depth: usize) {
         debug!("[Transcription] Queue depth: {}", depth);
+    }
+}
+
+// =============================================================================
+// Unit tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    /// Task 3.3: 0 dB gain produces a linear multiplier of 1.0 (no change).
+    #[test]
+    fn gain_zero_db_is_unity() {
+        let gain_db: f32 = 0.0;
+        let linear = 10f32.powf(gain_db / 20.0);
+        assert!((linear - 1.0f32).abs() < 1e-6, "0 dB should give linear=1.0, got {}", linear);
+
+        let sample: f32 = 0.5;
+        let result = (sample * linear).clamp(-1.0, 1.0);
+        assert!((result - 0.5).abs() < 1e-6);
+    }
+
+    /// Task 3.4: Large positive gain clamps output samples to [-1.0, 1.0].
+    #[test]
+    fn gain_clamps_to_valid_range() {
+        let gain_db: f32 = 40.0; // 100× linear — will saturate
+        let linear = 10f32.powf(gain_db / 20.0);
+
+        let samples: Vec<f32> = vec![0.1, -0.1, 0.9, -0.9, 1.0, -1.0];
+        let clamped: Vec<f32> = samples.iter().map(|s| (*s * linear).clamp(-1.0, 1.0)).collect();
+
+        for s in &clamped {
+            assert!(*s >= -1.0 && *s <= 1.0, "sample {} out of range", s);
+        }
+        // A large input should be clamped to exactly ±1.0
+        assert_eq!(clamped[2], 1.0);
+        assert_eq!(clamped[3], -1.0);
     }
 }

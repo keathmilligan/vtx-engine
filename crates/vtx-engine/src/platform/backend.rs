@@ -34,4 +34,11 @@ pub trait AudioBackend: Send + Sync {
 
     /// Set the recording mode.
     fn set_recording_mode(&self, mode: RecordingMode);
+
+    /// Set the microphone input gain hint in dB.
+    ///
+    /// Implementations MAY apply this via OS/driver APIs. The default
+    /// implementation is a no-op; software gain is applied in the
+    /// `AudioEngine` capture loop regardless.
+    fn set_gain(&self, _db: f32) {}
 }
