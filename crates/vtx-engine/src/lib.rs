@@ -265,6 +265,11 @@ pub struct AudioEngine {
     playback_active: Arc<AtomicBool>,
     /// Mic gain in dB stored as f32 bits in an AtomicU32 for lock-free hot-update.
     mic_gain_db: Arc<AtomicU32>,
+    /// Whether PTT (push-to-talk / manual) mode is active.
+    /// When `true`, VAD-driven segmentation is suppressed and the user
+    /// must manually start/stop recordings. When `false` (auto-transcription
+    /// mode), VAD drives segmentation automatically.
+    ptt_mode: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
@@ -340,7 +345,15 @@ impl AudioEngine {
         info!("[Engine] Manual recording stopped ({}ms)", duration_ms);
 
         if let Some(mut ts) = ts_lock {
-            ts.submit_recording();
+            // In PTT mode: submit the whole accumulated buffer as one transcription segment.
+            // In auto-transcription mode: the VAD already handled segmentation in real time;
+            // just save the WAV so the session appears as the active document and can be
+            // reprocessed, but don't re-queue it for transcription.
+            if self.ptt_mode.load(Ordering::SeqCst) {
+                ts.submit_recording();
+            } else {
+                ts.save_recording_wav();
+            }
             ts.set_manual_recording(false);
         }
 
@@ -424,7 +437,7 @@ impl AudioEngine {
         // backend, using the WAV's own sample rate.
         let loop_was_running = self.audio_loop_active.load(Ordering::SeqCst);
         if !loop_was_running {
-            let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(16);
+            let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(2);
             *self.playback_tx.lock().unwrap() = Some(inject_tx);
             {
                 let mut ts = self.transcribe_state.lock().unwrap();
@@ -545,9 +558,9 @@ impl AudioEngine {
         }
 
         // Create the audio injection channel for file playback.
-        // Bounded to 16 frames (~170ms at 48kHz/1024-sample chunks) to provide
-        // natural back-pressure so the feeder thread doesn't race too far ahead.
-        let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(16);
+        // Bounded to 2 frames (~20ms) so the feeder stays tightly paced with
+        // the audio loop and visualization events track the audio element closely.
+        let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(2);
         *self.playback_tx.lock().unwrap() = Some(inject_tx);
 
         self.start_audio_loop(sample_rate, inject_rx);
@@ -578,6 +591,7 @@ impl AudioEngine {
         let vad_enabled = self.vad_enabled;
         let visualization_enabled = self.visualization_enabled;
         let recording_active = self.recording_active.clone();
+        let ptt_mode = self.ptt_mode.clone();
         let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
         let mic_gain_db_atomic = self.mic_gain_db.clone();
 
@@ -646,19 +660,27 @@ impl AudioEngine {
                         }
                     }
 
-                    let is_manual_recording = recording_active.load(Ordering::SeqCst);
+                    let is_recording = recording_active.load(Ordering::SeqCst);
+                    let is_ptt = ptt_mode.load(Ordering::SeqCst);
 
                     if let Ok(mut ts) = transcribe_state.try_lock() {
-                        if is_manual_recording {
-                            // Manual recording: is_active is managed by
-                            // start_recording/stop_recording, not the global flag.
-                            ts.process_samples(&data.samples);
+                        if is_recording {
+                            // Always accumulate raw audio into the manual buffer so the
+                            // session can be saved as a WAV and reprocessed later.
+                            ts.write_manual_buffer(&data.samples);
                         } else {
+                            // Not recording: let the global transcription_enabled flag
+                            // control whether VAD mode is active.
                             ts.is_active = transcription_enabled.load(Ordering::SeqCst);
                         }
 
-                        if !is_manual_recording && ts.is_active && vad_enabled {
-                            // VAD mode: speech detection drives segmentation.
+                        // VAD-driven segmentation runs when:
+                        //   • Not in PTT mode (auto-transcription on), AND
+                        //   • Transcription is active, AND
+                        //   • VAD is enabled.
+                        // This applies both during a recording session and during
+                        // idle capture, so live segments are transcribed in real time.
+                        if !is_ptt && ts.is_active && vad_enabled {
                             if let processor::SpeechStateChange::Started { lookback_samples } =
                                 &pending_state_change
                             {
@@ -803,6 +825,24 @@ impl AudioEngine {
         } else if let Ok(mut ts) = self.transcribe_state.lock() {
             ts.finalize();
         }
+    }
+
+    /// Set PTT (push-to-talk / manual) mode.
+    ///
+    /// When `enabled` is `true`, VAD-driven automatic segmentation is
+    /// suppressed and the user must call [`start_recording`](Self::start_recording) /
+    /// [`stop_recording`](Self::stop_recording) to capture audio.
+    ///
+    /// When `enabled` is `false` (auto-transcription mode), VAD drives
+    /// segmentation automatically during live capture or file playback.
+    pub fn set_ptt_mode(&self, enabled: bool) {
+        info!("[Engine] PTT mode: {}", enabled);
+        self.ptt_mode.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Whether PTT (manual recording) mode is currently enabled.
+    pub fn is_ptt_mode(&self) -> bool {
+        self.ptt_mode.load(Ordering::SeqCst)
     }
 
     /// Check GPU acceleration status.

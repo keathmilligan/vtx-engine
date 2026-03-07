@@ -173,6 +173,22 @@ async fn is_recording(state: tauri::State<'_, AppState>) -> Result<bool, String>
 }
 
 #[tauri::command]
+async fn set_ptt_mode(state: tauri::State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.set_ptt_mode(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn finalize_segment(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.finalize_segment();
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_engine_config(state: tauri::State<'_, AppState>) -> Result<vtx_engine::EngineConfig, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
@@ -307,6 +323,8 @@ pub fn run() {
             stop_playback,
             get_engine_config,
             set_engine_config,
+            set_ptt_mode,
+            finalize_segment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

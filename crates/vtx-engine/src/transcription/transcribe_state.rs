@@ -270,6 +270,54 @@ impl TranscribeState {
         }
     }
 
+    /// Save the accumulated manual recording buffer to a WAV file and fire the
+    /// `on_recording_saved` callback, but do **not** enqueue for transcription.
+    ///
+    /// Used in auto-transcription mode where the VAD has already handled
+    /// real-time segmentation.  The WAV is still saved so the session appears
+    /// as the active document and can be reprocessed.
+    pub fn save_recording_wav(&mut self) {
+        let samples: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
+        self.manual_buffer_full_warned = false;
+
+        if samples.is_empty() {
+            tracing::debug!("[TranscribeState] save_recording_wav: no audio accumulated");
+            return;
+        }
+
+        tracing::info!(
+            "[TranscribeState] save_recording_wav: saving {} samples ({:.1}s)",
+            samples.len(),
+            samples.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
+        );
+
+        let filename = generate_recording_filename();
+        let recordings_dir = crate::audio::recordings_dir();
+        if let Err(e) = std::fs::create_dir_all(&recordings_dir) {
+            tracing::error!(
+                "[TranscribeState] Failed to create recordings directory: {}",
+                e
+            );
+            return;
+        }
+
+        let output_path = recordings_dir.join(&filename);
+        match save_to_wav(&samples, self.sample_rate, self.channels, &output_path) {
+            Ok(()) => {
+                tracing::info!(
+                    "[TranscribeState] Saved recording WAV to: {:?}",
+                    output_path
+                );
+                if let Some(ref cb) = self.callback {
+                    cb.on_recording_saved(output_path.to_string_lossy().to_string());
+                }
+            }
+            Err(e) => {
+                tracing::error!("[TranscribeState] Failed to save recording WAV: {}", e);
+            }
+        }
+    }
+
     /// Submit the entire accumulated manual recording audio for transcription.
     ///
     /// Drains the `manual_audio_buffer` (the growable Vec accumulated during
@@ -353,44 +401,44 @@ impl TranscribeState {
         self.seeking_word_break = false;
     }
 
-    /// Process incoming audio samples - writes to ring buffer and checks for overflow/duration
-    /// Returns Some(segment) if overflow extraction or grace period extraction occurred
-    /// Note: In manual recording mode, automatic segmentation is disabled and this always returns None
-    pub fn process_samples(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
-        if !self.is_active {
-            return None;
+    /// Append audio to the manual recording buffer (WAV accumulation) without
+    /// affecting the ring buffer or VAD segmentation state.
+    ///
+    /// This is called during recording sessions regardless of transcription mode
+    /// so that the captured audio is always saved to a WAV file.  Audio beyond
+    /// the 30-minute cap is silently dropped (one warning emitted).
+    pub fn write_manual_buffer(&mut self, samples: &[f32]) {
+        let remaining_capacity =
+            MANUAL_MAX_BUFFER_SAMPLES.saturating_sub(self.manual_audio_buffer.len());
+
+        if remaining_capacity == 0 {
+            if !self.manual_buffer_full_warned {
+                tracing::warn!(
+                    "[TranscribeState] Manual recording has reached the 30-minute maximum \
+                     buffer limit. Further audio will be discarded."
+                );
+                self.manual_buffer_full_warned = true;
+            }
+            return;
         }
 
-        // In manual recording mode, skip all automatic segmentation.
-        // Append audio to the dedicated buffer up to the 30-minute cap.
-        if self.manual_recording {
-            let remaining_capacity =
-                MANUAL_MAX_BUFFER_SAMPLES.saturating_sub(self.manual_audio_buffer.len());
+        let samples_to_write = samples.len().min(remaining_capacity);
+        self.manual_audio_buffer
+            .extend_from_slice(&samples[..samples_to_write]);
 
-            if remaining_capacity == 0 {
-                // Buffer is already at the cap — emit one warning and drop all further audio.
-                if !self.manual_buffer_full_warned {
-                    tracing::warn!(
-                        "[TranscribeState] Manual recording has reached the 30-minute maximum \
-                         buffer limit. Further audio will be discarded."
-                    );
-                    self.manual_buffer_full_warned = true;
-                }
-            } else {
-                // Accept as many samples as fit within the cap.
-                let samples_to_write = samples.len().min(remaining_capacity);
-                self.manual_audio_buffer
-                    .extend_from_slice(&samples[..samples_to_write]);
+        if samples_to_write < samples.len() && !self.manual_buffer_full_warned {
+            tracing::warn!(
+                "[TranscribeState] Manual recording has reached the 30-minute maximum \
+                 buffer limit. Further audio will be discarded."
+            );
+            self.manual_buffer_full_warned = true;
+        }
+    }
 
-                if samples_to_write < samples.len() && !self.manual_buffer_full_warned {
-                    tracing::warn!(
-                        "[TranscribeState] Manual recording has reached the 30-minute maximum \
-                         buffer limit. Further audio will be discarded."
-                    );
-                    self.manual_buffer_full_warned = true;
-                }
-            }
-
+    /// Process incoming audio samples - writes to ring buffer and checks for overflow/duration
+    /// Returns Some(segment) if overflow extraction or grace period extraction occurred
+    pub fn process_samples(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
+        if !self.is_active {
             return None;
         }
 
@@ -467,7 +515,7 @@ impl TranscribeState {
     /// Note: `lookback_samples` from the speech detector is in MONO samples (frames).
     /// We need to convert to stereo samples for the ring buffer which stores interleaved stereo.
     pub fn on_speech_started(&mut self, lookback_samples: usize) {
-        if !self.is_active || self.manual_recording {
+        if !self.is_active {
             return;
         }
 
@@ -493,7 +541,7 @@ impl TranscribeState {
 
     /// Handle speech-ended event: extract segment and queue for transcription
     pub fn on_speech_ended(&mut self) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || self.manual_recording {
+        if !self.is_active || !self.in_speech {
             return None;
         }
 
@@ -549,7 +597,7 @@ impl TranscribeState {
     /// This ensures we capture all speech before the pause and don't accidentally cut into
     /// the end of a word. The next segment will naturally start from this point.
     pub fn on_word_break(&mut self, offset_ms: u32, gap_duration_ms: u32) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || !self.seeking_word_break || self.manual_recording {
+        if !self.is_active || !self.in_speech || !self.seeking_word_break {
             return None;
         }
 

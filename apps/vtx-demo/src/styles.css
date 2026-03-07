@@ -76,6 +76,8 @@ header {
   padding: 12px 20px;
   background: var(--surface-panel);
   border-bottom: 1px solid var(--border-default);
+  flex-shrink: 0;
+  min-height: 48px;
 }
 
 header h1 {
@@ -96,6 +98,7 @@ header h1 {
   padding: 2px 8px;
   border-radius: 4px;
   background: var(--surface-input);
+  white-space: nowrap;
 }
 
 .status-badge {
@@ -104,6 +107,7 @@ header h1 {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.03em;
+  white-space: nowrap;
 }
 
 .badge-cuda {
@@ -253,12 +257,20 @@ button#btn-open-file:hover:not(:disabled) {
   background: var(--btn-primary-bg-hover);
 }
 
-button#btn-reprocess {
+button#btn-play {
   background: #8b5cf6;
 }
 
-button#btn-reprocess:hover:not(:disabled) {
+button#btn-play:hover:not(:disabled) {
   background: #7c3aed;
+}
+
+button#btn-play.playing {
+  background: var(--btn-recording-bg);
+}
+
+button#btn-play.playing:hover:not(:disabled) {
+  background: var(--btn-recording-bg-hover);
 }
 
 button#btn-download-model {

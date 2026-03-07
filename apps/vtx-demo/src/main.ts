@@ -179,8 +179,8 @@ const btnCapture = document.getElementById("btn-capture") as HTMLButtonElement;
 const btnOpenFile = document.getElementById(
   "btn-open-file"
 ) as HTMLButtonElement;
-const btnReprocess = document.getElementById(
-  "btn-reprocess"
+const btnPlay = document.getElementById(
+  "btn-play"
 ) as HTMLButtonElement;
 const btnDownloadModel = document.getElementById(
   "btn-download-model"
@@ -213,8 +213,8 @@ function setActiveDocument(path: string | null) {
     appTitle.textContent = APP_TITLE_BASE;
     document.title = APP_TITLE_BASE;
   }
-  // Enable Reprocess only when a document is open and not recording or playing
-  btnReprocess.disabled = !path || isRecording || isPlayingBack;
+  // Enable Play only when a document is open and not recording
+  btnPlay.disabled = !path || isRecording;
 }
 
 // =============================================================================
@@ -295,7 +295,7 @@ function setupRenderers() {
 function setupEventListeners() {
   btnCapture.addEventListener("click", toggleRecording);
   btnOpenFile.addEventListener("click", openWavFile);
-  btnReprocess.addEventListener("click", reprocessFile);
+  btnPlay.addEventListener("click", togglePlayback);
   btnDownloadModel.addEventListener("click", downloadModel);
   transcriptionToggle.addEventListener("change", onTranscriptionToggle);
   autoTranscriptionToggle.addEventListener("change", onAutoTranscriptionToggle);
@@ -507,8 +507,10 @@ async function startRecording() {
       source2Id: source2Id,
       aecEnabled: aecEnabled,
     });
-    // Begin accumulating a manual recording buffer so the session is saved
-    // as a single WAV and can be reprocessed after stopping.
+    // Always start a recording session so the captured audio is saved to a WAV
+    // file regardless of mode. In auto-transcription mode the backend also runs
+    // VAD-driven segmentation in parallel; in PTT mode the whole session is
+    // submitted as one segment on stop.
     await invoke("start_recording");
     isRecording = true;
     btnCapture.textContent = "Stop";
@@ -517,7 +519,7 @@ async function startRecording() {
     deviceSelect2.disabled = true;
     aecToggle.disabled = true;
     autoTranscriptionToggle.disabled = true;
-    btnReprocess.disabled = true;
+    btnPlay.disabled = true;
     statusText.textContent = "Capturing...";
 
     // Reset visualization and transcription output for the new session
@@ -538,8 +540,8 @@ async function startRecording() {
 
 async function stopRecording() {
   try {
-    // In manual mode (auto-transcription OFF), finalize the accumulated segment
-    // before stopping capture so the audio is submitted for transcription.
+    // In PTT mode, finalize the accumulated recording so it is submitted for
+    // transcription as a single segment before stopping.
     if (!autoTranscriptionEnabled && transcriptionEnabled) {
       try {
         await invoke("finalize_segment");
@@ -548,7 +550,9 @@ async function stopRecording() {
       }
     }
 
+    // Always stop the recording session (saves the WAV in both modes).
     const savedPath = await invoke<string | null>("stop_recording");
+
     await invoke("stop_capture");
     isRecording = false;
     btnCapture.textContent = "Record";
@@ -563,8 +567,8 @@ async function stopRecording() {
     if (savedPath) {
       setActiveDocument(savedPath);
     } else {
-      // Re-enable Reprocess if a document was already open
-      btnReprocess.disabled = !activeDocumentPath;
+      // Re-enable Play if a document was already open
+      btnPlay.disabled = !activeDocumentPath;
     }
 
     // Stop renderers
@@ -599,7 +603,7 @@ async function startFilePlayback(filePath: string) {
   setPlayingBack(true);
   statusText.textContent = "Playing...";
 
-  // Play audio through the configured output device via HTMLAudioElement.
+  // Prepare the audio element (but don't play yet).
   const audioUrl = convertFileSrc(filePath);
   playbackAudio = new Audio(audioUrl);
 
@@ -616,13 +620,13 @@ async function startFilePlayback(filePath: string) {
     }
   }
 
-  playbackAudio.play().catch((e) => {
-    console.error("Audio element playback failed:", e);
-  });
-
   const pttMode = !autoTranscriptionEnabled;
 
   try {
+    // Start the engine pipeline first so it is already processing audio by the
+    // time the audio element begins playback. open_file() returns as soon as the
+    // feeder thread is spawned, so the IPC round-trip latency becomes a head-start
+    // for the pipeline rather than a lag behind the audio element.
     await invoke("open_file", { path: filePath, pttMode });
     // Engine pipeline runs in the background; onPlaybackComplete() fires via event.
   } catch (e) {
@@ -630,14 +634,24 @@ async function startFilePlayback(filePath: string) {
     statusText.textContent = `Playback error: ${e}`;
     stopAudioElement();
     setPlayingBack(false);
+    return;
   }
+
+  // Start audible playback after the engine pipeline is running.
+  playbackAudio.play().catch((e) => {
+    console.error("Audio element playback failed:", e);
+  });
 }
 
 function setPlayingBack(active: boolean) {
   isPlayingBack = active;
   btnOpenFile.disabled = active;
   btnCapture.disabled = active || !deviceSelect.value;
-  btnReprocess.disabled = active || !activeDocumentPath;
+  // Play button stays enabled during playback so the user can stop it;
+  // it switches label and style to indicate the stop action.
+  btnPlay.disabled = !activeDocumentPath || isRecording;
+  btnPlay.textContent = active ? "\u25A0 Stop" : "\u25B6 Play";
+  btnPlay.classList.toggle("playing", active);
   if (active) {
     // Reset then start renderers so they show fresh data from this playback.
     waveformRenderer.clear();
@@ -655,9 +669,11 @@ function onPlaybackComplete() {
   waveformRenderer.stop();
   spectrogramRenderer.stop();
   speechActivityRenderer.stop();
+  btnPlay.textContent = "\u25B6 Play";
+  btnPlay.classList.remove("playing");
   btnOpenFile.disabled = false;
   btnCapture.disabled = !deviceSelect.value;
-  btnReprocess.disabled = !activeDocumentPath;
+  btnPlay.disabled = !activeDocumentPath;
   statusText.textContent = "Ready";
 }
 
@@ -678,9 +694,15 @@ async function openWavFile() {
   }
 }
 
-async function reprocessFile() {
-  if (!activeDocumentPath) return;
-  await startFilePlayback(activeDocumentPath);
+async function togglePlayback() {
+  if (isPlayingBack) {
+    // Stop active playback.
+    stopAudioElement();
+    await invoke("stop_playback").catch(() => {});
+    onPlaybackComplete();
+  } else if (activeDocumentPath) {
+    await startFilePlayback(activeDocumentPath);
+  }
 }
 
 // =============================================================================
@@ -763,16 +785,10 @@ async function onTranscriptionToggle() {
 async function onAutoTranscriptionToggle() {
   autoTranscriptionEnabled = autoTranscriptionToggle.checked;
   saveSettings(getCurrentSettings());
-  try {
-    // auto-transcription OFF means PTT mode ON (manual submission on stop)
-    await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled });
-  } catch (e) {
+  // auto-transcription OFF means PTT mode ON (manual submission on stop)
+  await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled }).catch((e) => {
     console.error("Failed to set PTT mode:", e);
-    // Revert the toggle on failure
-    autoTranscriptionEnabled = !autoTranscriptionEnabled;
-    autoTranscriptionToggle.checked = autoTranscriptionEnabled;
-    saveSettings(getCurrentSettings());
-  }
+  });
 }
 
 function onAecToggle() {
