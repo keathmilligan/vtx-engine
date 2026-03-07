@@ -721,6 +721,19 @@ pub fn init_library() -> Result<(), String> {
 
 fn resource_dir_paths(lib_name: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+
+    // On Windows, the build script places CUDA and CPU DLLs in
+    // cuda/ and cpu/ subdirectories next to the executable.
+    // Always probe these first so the app works without VTX_RESOURCE_DIR
+    // being set (e.g. during `cargo tauri dev` or direct exe launch).
+    #[cfg(windows)]
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            paths.push(exe_dir.join("cuda").join(lib_name));
+            paths.push(exe_dir.join("cpu").join(lib_name));
+        }
+    }
+
     if let Ok(resource_dir) = std::env::var("VTX_RESOURCE_DIR") {
         if !resource_dir.is_empty() {
             let base = PathBuf::from(resource_dir);
