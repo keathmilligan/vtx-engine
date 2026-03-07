@@ -730,4 +730,6 @@ pub enum EngineEvent {
         /// Duration in milliseconds
         duration_ms: u64,
     },
+    /// File playback through the engine pipeline has completed (or was cancelled).
+    PlaybackComplete,
 }

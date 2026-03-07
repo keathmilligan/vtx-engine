@@ -244,6 +244,14 @@ pub struct AudioEngine {
     recording_start: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Resolved path to the whisper model file
     model_path: std::path::PathBuf,
+    /// Path of the most recently saved WAV file from a manual recording session
+    last_recording_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    /// Sender side of the audio injection channel (for file playback).
+    /// Sending `AudioData` here feeds samples into the audio loop as if they
+    /// came from the hardware backend.
+    playback_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<AudioData>>>>,
+    /// Flag set while a file is being played back through the injection channel.
+    playback_active: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
@@ -331,6 +339,156 @@ impl AudioEngine {
         self.recording_active.load(Ordering::SeqCst)
     }
 
+    /// Return the path of the most recently saved WAV file from a manual
+    /// recording session, or `None` if no recording has completed yet.
+    pub fn get_last_recording_path(&self) -> Option<std::path::PathBuf> {
+        self.last_recording_path.lock().ok()?.clone()
+    }
+
+    /// Whether a file playback is currently active.
+    pub fn is_playing_back(&self) -> bool {
+        self.playback_active.load(Ordering::SeqCst)
+    }
+
+    /// Stop an active file playback, if any.
+    pub fn stop_playback(&self) {
+        self.playback_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Play a WAV file through the full engine pipeline (visualization + VAD +
+    /// transcription), exactly as if the audio were being captured live.
+    ///
+    /// - When `ptt_mode` is `true` the entire file is submitted as a single
+    ///   manual recording segment (equivalent to press→play→release in PTT).
+    /// - When `ptt_mode` is `false` the VAD drives automatic segmentation as
+    ///   it would during live capture.
+    ///
+    /// The method returns as soon as the feeder thread is spawned. The caller
+    /// can await completion by polling [`is_playing_back`](Self::is_playing_back)
+    /// or listening for a `PlaybackComplete` event on the broadcast channel
+    /// (emitted when the feeder thread finishes).
+    ///
+    /// Calling `play_file` while a playback is already in progress cancels the
+    /// previous playback first.
+    pub fn play_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        ptt_mode: bool,
+    ) -> Result<(), String> {
+        // Cancel any in-progress playback.
+        self.stop_playback();
+
+        let path_str = path.as_ref().to_string_lossy().to_string();
+
+        // Read the WAV file and decode to interleaved f32 samples.
+        let reader = hound::WavReader::open(&path_str)
+            .map_err(|e| format!("Failed to open WAV file: {}", e))?;
+        let spec = reader.spec();
+        let wav_sample_rate = spec.sample_rate;
+        let wav_channels = spec.channels;
+
+        let raw_samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => reader
+                .into_samples::<f32>()
+                .filter_map(|s| s.ok())
+                .collect(),
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                let max_val = (1u32 << (bits - 1)) as f32;
+                reader
+                    .into_samples::<i32>()
+                    .filter_map(|s| s.ok())
+                    .map(|s| s as f32 / max_val)
+                    .collect()
+            }
+        };
+
+        if raw_samples.is_empty() {
+            return Ok(());
+        }
+
+        // Ensure the audio loop is running. If not, start one without a hardware
+        // backend, using the WAV's own sample rate.
+        let loop_was_running = self.audio_loop_active.load(Ordering::SeqCst);
+        if !loop_was_running {
+            let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(16);
+            *self.playback_tx.lock().unwrap() = Some(inject_tx);
+            {
+                let mut ts = self.transcribe_state.lock().unwrap();
+                ts.init_for_capture(wav_sample_rate, wav_channels);
+                ts.is_active = self.transcription_enabled.load(Ordering::SeqCst);
+            }
+            self.start_audio_loop(wav_sample_rate, inject_rx);
+        }
+
+        // Grab the injection sender.
+        let tx = self.playback_tx
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "Playback channel not available".to_string())?;
+
+        self.playback_active.store(true, Ordering::SeqCst);
+
+        // In PTT mode, start a manual recording session so the whole file is
+        // submitted as one segment when playback ends.
+        if ptt_mode {
+            self.start_recording();
+        }
+
+        let playback_active = self.playback_active.clone();
+        let recording_active = self.recording_active.clone();
+        let transcribe_state_arc = self.transcribe_state.clone();
+        let sender = self.sender.clone();
+        let samples_per_chunk = (wav_sample_rate as usize / 100) * wav_channels as usize; // 10ms chunks
+        let chunk_duration = Duration::from_millis(10);
+
+        thread::spawn(move || {
+            info!("[Playback] Starting file playback: {}", path_str);
+
+            for chunk in raw_samples.chunks(samples_per_chunk.max(1)) {
+                if !playback_active.load(Ordering::SeqCst) {
+                    info!("[Playback] Playback cancelled");
+                    break;
+                }
+
+                let data = AudioData {
+                    samples: chunk.to_vec(),
+                    channels: wav_channels,
+                    sample_rate: wav_sample_rate,
+                };
+
+                // send() blocks when the channel is full, providing real-time pacing.
+                if tx.send(data).is_err() {
+                    // Receiver dropped (loop stopped) — abort.
+                    break;
+                }
+
+                thread::sleep(chunk_duration);
+            }
+
+            playback_active.store(false, Ordering::SeqCst);
+
+            // In PTT mode, stop the manual recording session to submit the accumulated audio.
+            if ptt_mode && recording_active.swap(false, Ordering::SeqCst) {
+                // Give the audio loop a moment to drain the last injected chunk
+                // before calling submit_recording(), so the full audio is captured.
+                thread::sleep(Duration::from_millis(150));
+                if let Ok(mut ts) = transcribe_state_arc.lock() {
+                    ts.submit_recording();
+                    ts.set_manual_recording(false);
+                }
+                let duration_ms = 0u64; // duration tracking not needed for playback PTT
+                let _ = sender.send(EngineEvent::RecordingStopped { duration_ms });
+            }
+
+            let _ = sender.send(EngineEvent::PlaybackComplete);
+            info!("[Playback] File playback finished");
+        });
+
+        Ok(())
+    }
+
     /// List available input devices (microphones).
     pub fn list_input_devices(&self) -> Vec<AudioDevice> {
         platform::get_backend()
@@ -373,7 +531,32 @@ impl AudioEngine {
             ts.is_active = self.transcription_enabled.load(Ordering::SeqCst);
         }
 
-        // Capture flags/arcs for the audio loop thread
+        // Create the audio injection channel for file playback.
+        // Bounded to 16 frames (~170ms at 48kHz/1024-sample chunks) to provide
+        // natural back-pressure so the feeder thread doesn't race too far ahead.
+        let (inject_tx, inject_rx) = std::sync::mpsc::sync_channel::<AudioData>(16);
+        *self.playback_tx.lock().unwrap() = Some(inject_tx);
+
+        self.start_audio_loop(sample_rate, inject_rx);
+
+        let _ = self.sender.send(EngineEvent::CaptureStateChanged {
+            capturing: true,
+            error: None,
+        });
+
+        Ok(())
+    }
+
+    /// Spawn the audio processing loop thread.
+    ///
+    /// This is factored out so it can be started both from `start_capture`
+    /// (with a hardware backend providing audio) and from `play_file`
+    /// (injection-only, no hardware backend required).
+    fn start_audio_loop(
+        &self,
+        sample_rate: u32,
+        inject_rx: std::sync::mpsc::Receiver<AudioData>,
+    ) {
         let loop_active = self.audio_loop_active.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let sender = self.sender.clone();
@@ -399,7 +582,10 @@ impl AudioEngine {
                     break;
                 }
 
-                let audio_data = platform::get_backend().and_then(|b| b.try_recv());
+                // Prefer live hardware audio; fall back to injected playback audio.
+                let audio_data = platform::get_backend()
+                    .and_then(|b| b.try_recv())
+                    .or_else(|| inject_rx.try_recv().ok());
 
                 if let Some(data) = audio_data {
                     let mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
@@ -487,13 +673,6 @@ impl AudioEngine {
 
             info!("[AudioLoop] Audio processing loop stopped");
         });
-
-        let _ = self.sender.send(EngineEvent::CaptureStateChanged {
-            capturing: true,
-            error: None,
-        });
-
-        Ok(())
     }
 
     /// Stop audio capture.

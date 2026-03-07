@@ -10,9 +10,26 @@ use crate::{RecordingMode, TranscriptionProfile, WhisperModel};
 
 use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
 use crate::transcription;
+use crate::transcription::TranscribeStateCallback;
 
 /// Broadcast channel capacity.
 const BROADCAST_CAPACITY: usize = 256;
+
+/// [`TranscribeStateCallback`] implementation that stores the path of each
+/// saved recording WAV into a shared slot on the engine.
+struct LastRecordingPathCallback {
+    last_recording_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+}
+
+impl TranscribeStateCallback for LastRecordingPathCallback {
+    fn on_recording_saved(&self, path: String) {
+        if let Ok(mut guard) = self.last_recording_path.lock() {
+            *guard = Some(std::path::PathBuf::from(path));
+        }
+    }
+
+    fn on_queue_update(&self, _depth: usize) {}
+}
 
 /// Fluent builder for constructing an [`AudioEngine`].
 ///
@@ -281,9 +298,15 @@ impl EngineBuilder {
             Arc::new(transcription::TranscriptionQueue::new())
         });
 
-        let transcribe_state = Arc::new(std::sync::Mutex::new(
-            transcription::TranscribeState::new(queue_for_state),
-        ));
+        // Shared slot that the TranscribeStateCallback writes the WAV path into.
+        let last_recording_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let mut ts = transcription::TranscribeState::new(queue_for_state);
+        ts.set_callback(Arc::new(LastRecordingPathCallback {
+            last_recording_path: last_recording_path.clone(),
+        }));
+        let transcribe_state = Arc::new(std::sync::Mutex::new(ts));
 
         let engine = AudioEngine {
             config: self.config,
@@ -298,6 +321,9 @@ impl EngineBuilder {
             recording_active: Arc::new(AtomicBool::new(false)),
             recording_start: Arc::new(std::sync::Mutex::new(None)),
             model_path: resolved_model_path,
+            last_recording_path,
+            playback_tx: Arc::new(std::sync::Mutex::new(None)),
+            playback_active: Arc::new(AtomicBool::new(false)),
         };
 
         Ok((engine, receiver))

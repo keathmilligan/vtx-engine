@@ -126,10 +126,42 @@ async fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String
 }
 
 #[tauri::command]
-async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     engine.stop_recording();
+    let path = engine.get_last_recording_path()
+        .map(|p| p.to_string_lossy().into_owned());
+    Ok(path)
+}
+
+#[tauri::command]
+async fn reprocess_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    ptt_mode: bool,
+) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.play_file(path, ptt_mode)
+}
+
+#[tauri::command]
+async fn open_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    ptt_mode: bool,
+) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.play_file(path, ptt_mode)
+}
+
+#[tauri::command]
+async fn stop_playback(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let engine_lock = state.engine.lock().await;
+    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
+    engine.stop_playback();
     Ok(())
 }
 
@@ -219,6 +251,9 @@ pub fn run() {
                                 EngineEvent::RecordingStopped { duration_ms } => {
                                     let _ = ah.emit("recording-stopped", duration_ms);
                                 }
+                                EngineEvent::PlaybackComplete => {
+                                    let _ = ah.emit("playback-complete", ());
+                                }
                             }
                         }).spawn();
 
@@ -249,6 +284,9 @@ pub fn run() {
             start_recording,
             stop_recording,
             is_recording,
+            open_file,
+            reprocess_file,
+            stop_playback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

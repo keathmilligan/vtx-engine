@@ -15,5 +15,5 @@ pub mod transcriber;
 pub mod whisper_ffi;
 
 pub use queue::{TranscriptionCallback, TranscriptionQueue};
-pub use transcribe_state::TranscribeState;
+pub use transcribe_state::{TranscribeState, TranscribeStateCallback};
 pub use transcriber::{download_model, Transcriber};

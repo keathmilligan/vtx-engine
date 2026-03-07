@@ -2,7 +2,7 @@
 //
 // Demonstrates live audio capture with visualization, and WAV file transcription.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -35,10 +35,12 @@ interface GpuStatus {
   system_info: string;
 }
 
-interface TranscriptionResult {
+interface TranscriptionSegment {
+  id: string;
   text: string;
-  duration_ms: number | null;
-  audio_path: string | null;
+  timestamp_offset_ms: number;
+  duration_ms: number;
+  audio_path?: string;
 }
 
 // =============================================================================
@@ -100,6 +102,9 @@ function getCurrentSettings(): AppSettings {
 // =============================================================================
 
 let isRecording = false;
+let isPlayingBack = false;
+let activeDocumentPath: string | null = null;
+let playbackAudio: HTMLAudioElement | null = null;
 let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
@@ -124,9 +129,13 @@ const deviceSelect = document.getElementById(
 const deviceSelect2 = document.getElementById(
   "device-select-2"
 ) as HTMLSelectElement;
+const appTitle = document.querySelector("header h1")!;
 const btnCapture = document.getElementById("btn-capture") as HTMLButtonElement;
 const btnOpenFile = document.getElementById(
   "btn-open-file"
+) as HTMLButtonElement;
+const btnReprocess = document.getElementById(
+  "btn-reprocess"
 ) as HTMLButtonElement;
 const btnDownloadModel = document.getElementById(
   "btn-download-model"
@@ -141,6 +150,27 @@ const aecToggle = document.getElementById(
   "aec-toggle"
 ) as HTMLInputElement;
 const transcriptionOutput = document.getElementById("transcription-output")!;
+
+// =============================================================================
+// Document Model
+// =============================================================================
+
+const APP_TITLE_BASE = "VTX Engine Demo";
+
+function setActiveDocument(path: string | null) {
+  activeDocumentPath = path;
+  if (path) {
+    // Extract just the filename from the full path
+    const filename = path.replace(/\\/g, "/").split("/").pop() ?? path;
+    appTitle.textContent = `${APP_TITLE_BASE}: ${filename}`;
+    document.title = `${APP_TITLE_BASE}: ${filename}`;
+  } else {
+    appTitle.textContent = APP_TITLE_BASE;
+    document.title = APP_TITLE_BASE;
+  }
+  // Enable Reprocess only when a document is open and not recording or playing
+  btnReprocess.disabled = !path || isRecording || isPlayingBack;
+}
 
 // =============================================================================
 // Initialization
@@ -220,6 +250,7 @@ function setupRenderers() {
 function setupEventListeners() {
   btnCapture.addEventListener("click", toggleRecording);
   btnOpenFile.addEventListener("click", openWavFile);
+  btnReprocess.addEventListener("click", reprocessFile);
   btnDownloadModel.addEventListener("click", downloadModel);
   transcriptionToggle.addEventListener("change", onTranscriptionToggle);
   autoTranscriptionToggle.addEventListener("change", onAutoTranscriptionToggle);
@@ -251,22 +282,31 @@ async function setupBackendListeners() {
     }
   });
 
-  // Transcription results
-  await listen<TranscriptionResult>("transcription-complete", (event) => {
+  // Transcription results (live capture / VAD mode)
+  await listen<TranscriptionSegment>("transcription-complete", (event) => {
     addTranscriptionResult(event.payload);
+  });
+
+  // Transcription segments (file playback VAD mode emits these)
+  await listen<TranscriptionSegment>("transcription-segment", (event) => {
+    addTranscriptionResult(event.payload);
+  });
+
+  // File playback complete
+  await listen("playback-complete", () => {
+    onPlaybackComplete();
   });
 
   // Capture state changes
   await listen<{ capturing: boolean; error: string | null }>(
     "capture-state-changed",
     (event) => {
-      if (event.payload.capturing) {
-        statusText.textContent = "Capturing...";
-      } else {
-        statusText.textContent = "Ready";
-      }
       if (event.payload.error) {
         statusText.textContent = `Error: ${event.payload.error}`;
+      } else if (event.payload.capturing && isRecording) {
+        statusText.textContent = "Capturing...";
+      } else if (!event.payload.capturing && !isPlayingBack) {
+        statusText.textContent = "Ready";
       }
     }
   );
@@ -277,8 +317,8 @@ async function setupBackendListeners() {
   });
 
   await listen("speech-ended", () => {
-    if (isRecording) {
-      statusText.textContent = "Capturing...";
+    if (isRecording || isPlayingBack) {
+      statusText.textContent = isRecording ? "Capturing..." : "Playing...";
     }
   });
 
@@ -426,6 +466,7 @@ async function startRecording() {
     deviceSelect2.disabled = true;
     aecToggle.disabled = true;
     autoTranscriptionToggle.disabled = true;
+    btnReprocess.disabled = true;
     statusText.textContent = "Capturing...";
 
     // Start renderers
@@ -450,6 +491,7 @@ async function stopRecording() {
       }
     }
 
+    const savedPath = await invoke<string | null>("stop_recording");
     await invoke("stop_capture");
     isRecording = false;
     btnCapture.textContent = "Record";
@@ -459,6 +501,14 @@ async function stopRecording() {
     aecToggle.disabled = false;
     autoTranscriptionToggle.disabled = false;
     statusText.textContent = "Ready";
+
+    // Set the saved recording as the active document
+    if (savedPath) {
+      setActiveDocument(savedPath);
+    } else {
+      // Re-enable Reprocess if a document was already open
+      btnReprocess.disabled = !activeDocumentPath;
+    }
 
     // Stop renderers
     waveformRenderer.stop();
@@ -470,42 +520,96 @@ async function stopRecording() {
 }
 
 // =============================================================================
-// File Transcription
+// File Playback (Open / Reprocess)
 // =============================================================================
+
+/** Stop any in-progress audio element playback. */
+function stopAudioElement() {
+  if (playbackAudio) {
+    playbackAudio.pause();
+    playbackAudio.src = "";
+    playbackAudio = null;
+  }
+}
+
+/** Start playing a file through the engine pipeline and update UI state. */
+async function startFilePlayback(filePath: string) {
+  // Stop any previous playback (audio element and engine pipeline).
+  stopAudioElement();
+  await invoke("stop_playback").catch(() => {});
+
+  clearTranscriptionOutput();
+  setPlayingBack(true);
+  statusText.textContent = "Playing...";
+
+  // Play audio through the default output device via HTMLAudioElement.
+  const audioUrl = convertFileSrc(filePath);
+  playbackAudio = new Audio(audioUrl);
+  playbackAudio.play().catch((e) => {
+    console.error("Audio element playback failed:", e);
+  });
+
+  const pttMode = !autoTranscriptionEnabled;
+
+  try {
+    await invoke("open_file", { path: filePath, pttMode });
+    // Engine pipeline runs in the background; onPlaybackComplete() fires via event.
+  } catch (e) {
+    console.error("Playback failed:", e);
+    statusText.textContent = `Playback error: ${e}`;
+    stopAudioElement();
+    setPlayingBack(false);
+  }
+}
+
+function setPlayingBack(active: boolean) {
+  isPlayingBack = active;
+  btnOpenFile.disabled = active;
+  btnCapture.disabled = active || !deviceSelect.value;
+  btnReprocess.disabled = active || !activeDocumentPath;
+  if (active) {
+    // Reset then start renderers so they show fresh data from this playback.
+    waveformRenderer.clear();
+    spectrogramRenderer.clear();
+    speechActivityRenderer.clear();
+    waveformRenderer.start();
+    spectrogramRenderer.start();
+    speechActivityRenderer.start();
+  }
+}
+
+function onPlaybackComplete() {
+  stopAudioElement();
+  isPlayingBack = false;
+  waveformRenderer.stop();
+  spectrogramRenderer.stop();
+  speechActivityRenderer.stop();
+  btnOpenFile.disabled = false;
+  btnCapture.disabled = !deviceSelect.value;
+  btnReprocess.disabled = !activeDocumentPath;
+  statusText.textContent = "Ready";
+}
 
 async function openWavFile() {
   try {
     const selected = await open({
       multiple: false,
-      filters: [
-        {
-          name: "WAV Audio",
-          extensions: ["wav"],
-        },
-      ],
+      filters: [{ name: "WAV Audio", extensions: ["wav"] }],
     });
 
     if (!selected) return;
 
     const filePath = typeof selected === "string" ? selected : selected;
-    statusText.textContent = "Transcribing...";
-    btnOpenFile.disabled = true;
-
-    try {
-      const result = await invoke<TranscriptionResult>("transcribe_file", {
-        path: filePath,
-      });
-      addTranscriptionResult(result);
-      statusText.textContent = "Ready";
-    } catch (e) {
-      console.error("Transcription failed:", e);
-      statusText.textContent = `Transcription error: ${e}`;
-    } finally {
-      btnOpenFile.disabled = false;
-    }
+    setActiveDocument(filePath);
+    await startFilePlayback(filePath);
   } catch (e) {
     console.error("File dialog error:", e);
   }
+}
+
+async function reprocessFile() {
+  if (!activeDocumentPath) return;
+  await startFilePlayback(activeDocumentPath);
 }
 
 // =============================================================================
@@ -609,7 +713,11 @@ function onAecToggle() {
 // Transcription Output
 // =============================================================================
 
-function addTranscriptionResult(result: TranscriptionResult) {
+function clearTranscriptionOutput() {
+  transcriptionOutput.innerHTML = "";
+}
+
+function addTranscriptionResult(result: TranscriptionSegment) {
   // Remove placeholder
   const placeholder = transcriptionOutput.querySelector(".placeholder");
   if (placeholder) placeholder.remove();

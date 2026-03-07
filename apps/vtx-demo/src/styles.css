@@ -237,19 +237,27 @@ button:disabled {
   cursor: not-allowed;
 }
 
-button#btn-capture.recording {
+button#btn-capture {
   background: var(--btn-recording-bg);
 }
 
-button#btn-capture.recording:hover:not(:disabled) {
+button#btn-capture:hover:not(:disabled) {
   background: var(--btn-recording-bg-hover);
 }
 
 button#btn-open-file {
-  background: #8b5cf6;
+  background: var(--btn-primary-bg);
 }
 
 button#btn-open-file:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+}
+
+button#btn-reprocess {
+  background: #8b5cf6;
+}
+
+button#btn-reprocess:hover:not(:disabled) {
   background: #7c3aed;
 }
 
