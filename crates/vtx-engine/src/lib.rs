@@ -351,10 +351,17 @@ impl AudioEngine {
             // reprocessed, but don't re-queue it for transcription.
             if self.ptt_mode.load(Ordering::SeqCst) {
                 ts.submit_recording();
+                ts.set_manual_recording(false);
             } else {
+                // Clear manual_recording first so that finalize() takes the VAD branch
+                // (in_speech check) rather than the PTT branch (submit_recording).
+                // This flushes any speech segment that was still in progress when the
+                // user stopped — i.e. on_speech_ended() never fired because the VAD
+                // hold timer hadn't elapsed yet.
+                ts.set_manual_recording(false);
+                ts.finalize();
                 ts.save_recording_wav();
             }
-            ts.set_manual_recording(false);
         }
 
         let _ = self.sender.send(EngineEvent::RecordingStopped { duration_ms });
