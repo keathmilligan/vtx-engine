@@ -12,6 +12,7 @@ Provides platform-native audio capture, real-time speech detection, audio visual
 - **Visualization** — Real-time waveform downsampling, 512-point FFT spectrogram with log-frequency mapping and color gradient LUT, per-frame speech activity metrics
 - **Live transcription** — Whisper.cpp loaded at runtime via dynamic FFI; VAD-driven segmentation with hallucination mitigation (entropy/logprob thresholds, repetition-loop removal)
 - **Manual recording** — `start_recording()` / `stop_recording()` for long-form capture (up to 30 minutes); VAD segmentation is suspended while recording
+- **File playback** — `play_file()` routes a WAV file through the full engine pipeline (visualization + VAD + transcription), with optional PTT-mode for whole-file single-segment submission
 - **Stream transcription** — `transcribe_audio_stream`: accepts a channel of 16 kHz mono f32 PCM frames, runs single-pass Whisper inference when the channel closes, returns `Vec<TranscriptionSegment>`
 - **File transcription** — `transcribe_audio_file`: loads a WAV file, resamples to 16 kHz mono, returns `Vec<TranscriptionSegment>`
 - **Model management** — `ModelManager`: typed `WhisperModel` enum covering all 9 ggml variants, platform-aware cache directory, async download with progress callback
@@ -50,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (engine, mut rx) = EngineBuilder::new()
+        .app_name("my-app")
         .with_profile(TranscriptionProfile::Dictation)
         .build()
         .await?;
@@ -82,6 +84,7 @@ use std::time::Instant;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _rx) = EngineBuilder::new()
+        .app_name("my-app")
         .with_profile(TranscriptionProfile::Transcription)
         .build()
         .await?;
@@ -100,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See [USAGE.md](USAGE.md) for full examples covering model management, config persistence, and subsystem configuration.
+See [USAGE.md](USAGE.md) for full examples covering manual recording, file playback, model management, config persistence, and subsystem configuration.
 
 ## Whisper Models
 

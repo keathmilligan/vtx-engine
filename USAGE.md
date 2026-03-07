@@ -2,12 +2,16 @@
 
 This guide covers the primary integration patterns for vtx-engine:
 
-1. **Real-Time Dictation** — short-burst VAD-driven microphone dictation (FlowSTT-style).
-2. **Stream Transcription** — post-capture or encoder-tee transcription with timestamped segments (OmniRec-style).
-3. **Push-to-Talk** — manual PTT segmentation as an alternative to VAD.
-4. **Model Management** — checking availability and downloading Whisper models.
-5. **Config Persistence** — loading and saving `EngineConfig` to disk.
-6. **Subsystem Configuration** — disabling unused subsystems at build time.
+1. **Real-Time Dictation** — short-burst VAD-driven microphone dictation.
+2. **Stream Transcription** — post-capture or encoder-tee transcription with timestamped segments.
+3. **File Transcription** — transcribe a WAV file and get timestamped segments.
+4. **File Playback** — route a WAV file through the full engine pipeline.
+5. **Manual Recording** — application-controlled start/stop recording as an alternative to VAD.
+6. **Model Management** — checking availability and downloading Whisper models.
+7. **Config Persistence** — loading and saving `EngineConfig` to disk.
+8. **Transcription History** — recording and managing a persistent history of transcription results.
+9. **Subsystem Configuration** — disabling unused subsystems at build time.
+10. **Device Testing** — testing audio input levels before starting a capture session.
 
 ---
 
@@ -17,9 +21,11 @@ This guide covers the primary integration patterns for vtx-engine:
 # Cargo.toml
 [dependencies]
 vtx-engine = "0.1"
-vtx-common = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
+
+All public types (`EngineEvent`, `TranscriptionProfile`, `WhisperModel`, `RecordingMode`,
+`EngineConfig`, etc.) are exported directly from the `vtx_engine` crate root.
 
 ---
 
@@ -30,7 +36,7 @@ utterance is transcribed and delivered as a `TranscriptionComplete` event.
 
 ```rust
 use vtx_engine::{EngineBuilder, ModelManager};
-use vtx_common::{EngineEvent, TranscriptionProfile, WhisperModel};
+use vtx_engine::{EngineEvent, TranscriptionProfile, WhisperModel};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the engine with the Dictation profile.
     let (engine, mut rx) = EngineBuilder::new()
+        .app_name("my-app")
         .with_profile(TranscriptionProfile::Dictation)
         .build()
         .await?;
@@ -111,7 +118,7 @@ The engine does not resample inside `transcribe_audio_stream`.
 use std::time::Instant;
 use tokio::sync::mpsc;
 use vtx_engine::{EngineBuilder, ModelManager};
-use vtx_common::{EngineEvent, TranscriptionProfile, WhisperModel};
+use vtx_engine::{EngineEvent, TranscriptionProfile, WhisperModel};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -126,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the engine with the Transcription profile (no capture session needed).
     let (engine, mut rx) = EngineBuilder::new()
+        .app_name("my-app")
         .with_profile(TranscriptionProfile::Transcription)
         .build()
         .await?;
@@ -184,37 +192,129 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | VAD voiced threshold | -42 dB |
 | VAD whisper threshold | -52 dB |
 
+### `transcribe_audio_stream` Input Contract
+
+- Audio must be **16 kHz mono f32 PCM** — no resampling is done inside the engine.
+- Frames may be any length; the engine accumulates them into an internal buffer.
+- Drop the sender (`tx`) to signal end of stream. The `JoinHandle` resolves with the complete segment list.
+- `TranscriptionSegment` events are also emitted on the broadcast channel in real time as each segment completes.
+- Minimum buffer length to attempt transcription is ~500 ms (8 000 samples at 16 kHz).
+
 ---
 
-## Push-to-Talk
+## File Transcription
 
-Use `TranscriptionMode::PushToTalk` when segment boundaries should be determined
-by application logic (a hotkey, button, or gamepad input) rather than VAD.
+Use `transcribe_audio_file` to transcribe a WAV file directly without a capture session.
+The file is loaded, resampled to 16 kHz mono, and run through a single Whisper inference pass.
 
 ```rust
 use vtx_engine::EngineBuilder;
-use vtx_common::{EngineEvent, TranscriptionMode};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _rx) = EngineBuilder::new()
+        .app_name("my-app")
+        .build()
+        .await?;
+
+    let segments = engine.transcribe_audio_file("recording.wav").await?;
+    for seg in &segments {
+        println!("[{:.1}s] {}", seg.timestamp_offset_ms as f64 / 1000.0, seg.text);
+    }
+
+    Ok(())
+}
+```
+
+Returns `Ok(vec![])` for a silent file. Each segment carries a `timestamp_offset_ms`
+relative to the start of the file and its `duration_ms`.
+
+---
+
+## File Playback
+
+`play_file` routes a WAV file through the full engine pipeline — visualization,
+VAD, and transcription — exactly as if the audio were being captured live.
+
+Two modes are available:
+
+- **VAD mode** (`ptt_mode = false`): The VAD drives automatic segmentation, just like live capture.
+- **PTT mode** (`ptt_mode = true`): The entire file is submitted as a single recording segment.
+
+```rust
+use vtx_engine::{EngineBuilder, EngineEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (engine, mut rx) = EngineBuilder::new()
-        .transcription_mode(TranscriptionMode::PushToTalk)
+        .app_name("my-app")
         .build()
         .await?;
 
-    // Get a cloneable, Send controller.
-    let ptt = engine.ptt_controller();
-
-    // Forward events.
+    // Listen for transcription and playback-complete events.
     tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
             match event {
                 EngineEvent::TranscriptionComplete(result) => {
-                    println!("[PTT] {}", result.text);
+                    println!("[Transcription] {}", result.text);
                 }
-                EngineEvent::SpeechStarted => println!("[PTT] recording..."),
-                EngineEvent::SpeechEnded { duration_ms } => {
-                    println!("[PTT] captured {}ms", duration_ms);
+                EngineEvent::PlaybackComplete => {
+                    println!("[Playback] Done");
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Play a file through the engine; VAD drives segmentation.
+    engine.play_file("recording.wav", false)?;
+
+    // Wait for playback to finish.
+    while engine.is_playing_back() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    Ok(())
+}
+```
+
+### `play_file` Notes
+
+- Returns as soon as the feeder thread is spawned; poll `is_playing_back()` or listen for `PlaybackComplete` to detect completion.
+- Calling `play_file` while playback is already in progress cancels the previous playback first.
+- If no capture session is active, `play_file` starts an internal audio loop at the WAV file's native sample rate (no hardware device required).
+- Call `stop_playback()` to cancel an active playback.
+
+---
+
+## Manual Recording
+
+Use `start_recording()` / `stop_recording()` when segment boundaries should be
+determined by application logic (a button press, a hotkey, etc.) rather than VAD.
+While a manual recording session is active, VAD-driven segmentation is suppressed
+and audio accumulates in a growable buffer (up to 30 minutes).
+
+```rust
+use vtx_engine::{EngineBuilder, EngineEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, mut rx) = EngineBuilder::new()
+        .app_name("my-app")
+        .build()
+        .await?;
+
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                EngineEvent::RecordingStarted => {
+                    println!("[Recording] Started");
+                }
+                EngineEvent::RecordingStopped { duration_ms } => {
+                    println!("[Recording] Stopped after {}ms", duration_ms);
+                }
+                EngineEvent::TranscriptionComplete(result) => {
+                    println!("[Transcription] {}", result.text);
                 }
                 _ => {}
             }
@@ -225,9 +325,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.start_capture(devices.first().map(|d| d.id.clone()), None).await?;
 
     // Simulate PTT press/release (replace with your actual input handler).
-    ptt.press();
+    engine.start_recording();
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    ptt.release();   // Submits segment for transcription.
+    engine.stop_recording(); // Submits accumulated audio for transcription.
 
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     engine.stop_capture().await?;
@@ -235,16 +335,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### `PushToTalkController` API
+### Manual Recording API
 
 | Method | Description |
 |---|---|
-| `press()` | Signal PTT key-down. Emits `SpeechStarted`. No-op if session already open. |
-| `release()` | Signal PTT key-up. Submits audio, emits `SpeechEnded`. No-op if no session open. |
-| `set_active(bool)` | Convenience: `true` → `press()`, `false` → `release()`. |
-| `is_active()` | Whether a PTT session is currently open. |
+| `start_recording()` | Begin accumulating audio. Emits `RecordingStarted`. No-op if already recording. |
+| `stop_recording()` | Stop and submit audio for transcription. Emits `RecordingStopped`. No-op if not recording. |
+| `is_recording()` | Whether a manual recording session is currently active. |
+| `get_last_recording_path()` | Path to the WAV file saved by the most recently completed recording, if any. |
+| `finalize_segment()` | Stop recording (if active) and submit, or finalize any in-progress VAD segment. |
 
-`PushToTalkController` is `Clone + Send + 'static` — safe to share across threads and Tauri commands.
+To disable VAD-driven auto-transcription entirely while still capturing audio, call
+`engine.set_transcription_enabled(false)` before starting capture, then call
+`engine.set_transcription_enabled(true)` before calling `start_recording()` /
+`stop_recording()`.
 
 ---
 
@@ -255,7 +359,7 @@ Use it in your settings UI or first-run setup wizard to manage Whisper models.
 
 ```rust
 use vtx_engine::ModelManager;
-use vtx_common::WhisperModel;
+use vtx_engine::WhisperModel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -287,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### `ModelManager` API Summary
+### `ModelManager` API
 
 | Method | Description |
 |---|---|
@@ -297,12 +401,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `list_cached()` | All available variants in ascending size order |
 | `download(model, on_progress)` | Async download from Hugging Face with progress callback (0–100) |
 
-### `transcribe_audio_stream` Input Contract
-
-- Audio must be **16 kHz mono f32 PCM** — no resampling is done inside the engine.
-- Frames may be any length; the engine accumulates them into an internal buffer.
-- Drop the sender (`tx`) to signal end of stream. The `JoinHandle` resolves with the complete segment list.
-- `TranscriptionSegment` events are also emitted on the broadcast channel in real time as each segment completes.
+Downloads write to a `.part` temporary file and atomically rename to the final path
+on success — a partial download never appears as available. Returns
+`ModelError::AlreadyDownloading` if a download for the same model is already in
+progress on that `ModelManager` instance.
 
 ---
 
@@ -314,10 +416,11 @@ directory (`~/.config/{app_name}/` on Linux, `%APPDATA%\{app_name}\` on Windows,
 
 ```rust
 use vtx_engine::EngineConfig;
-use vtx_common::{TranscriptionProfile, WhisperModel};
+use vtx_engine::{TranscriptionProfile, WhisperModel};
 
 fn load_or_default() -> EngineConfig {
-    // Loads from `{config_dir}/vtx-engine.toml` if it exists; returns default otherwise.
+    // Loads from `{config_dir}/{app_name}/vtx-engine.toml` if it exists;
+    // returns default otherwise.
     EngineConfig::load("my-app").unwrap_or_default()
 }
 
@@ -336,16 +439,68 @@ serialized config files. Prefer `model` in new code.
 
 ---
 
+## Transcription History
+
+`TranscriptionHistory` is a bounded NDJSON-backed store for persisting dictation
+results. `TranscriptionHistoryRecorder` subscribes to the engine event channel
+and appends an entry for every `TranscriptionComplete` event automatically.
+
+```rust
+use std::sync::{Arc, Mutex};
+use vtx_engine::{EngineBuilder, TranscriptionHistory, TranscriptionHistoryRecorder};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, rx) = EngineBuilder::new()
+        .app_name("my-app")
+        .build()
+        .await?;
+
+    // Open (or create) the history store — bounded to 500 entries.
+    let history = Arc::new(Mutex::new(
+        TranscriptionHistory::open("my-app", 500)?
+    ));
+
+    // Spawn a recorder that writes an entry for every TranscriptionComplete event.
+    TranscriptionHistoryRecorder::new(rx, history.clone()).start();
+
+    // ... start capture, run dictation ...
+
+    // Read history entries (most recent last).
+    let h = history.lock().unwrap();
+    for entry in h.entries() {
+        println!("[{}] {}", entry.timestamp, entry.text);
+    }
+
+    Ok(())
+}
+```
+
+### `TranscriptionHistory` API
+
+| Method | Description |
+|---|---|
+| `TranscriptionHistory::open(app_name, max_entries)` | Open or create the history store |
+| `entries()` | All entries in insertion order |
+| `append(entry)` | Append a new entry; evicts oldest if at capacity |
+| `delete(id)` | Remove entry by ID and delete its WAV file (if any) |
+| `cleanup_wav_files(ttl)` | Delete WAV files older than `ttl`; clears `wav_path` on affected entries |
+
+History is stored at `{data_dir}/{app_name}/history.ndjson`. WAV recordings
+referenced by entries are stored under `{data_dir}/{app_name}/recordings/`.
+
+---
+
 ## Profiles Reference
 
 ```rust
-use vtx_common::TranscriptionProfile;
+use vtx_engine::TranscriptionProfile;
 use vtx_engine::EngineBuilder;
 
-// Dictation (FlowSTT-style short-burst)
+// Dictation (short-burst VAD-driven)
 let builder = EngineBuilder::new().with_profile(TranscriptionProfile::Dictation);
 
-// Long-form transcription (OmniRec-style)
+// Long-form transcription
 let builder = EngineBuilder::new().with_profile(TranscriptionProfile::Transcription);
 
 // Custom — no presets, set everything manually
@@ -386,7 +541,77 @@ let (engine, mut rx) = EngineBuilder::new()
 |---|---|
 | `without_transcription()` | No `TranscriptionComplete` or `TranscriptionSegment` events; whisper.cpp not loaded |
 | `without_visualization()` | No `VisualizationData` events |
-| `without_vad()` | No `SpeechStarted`/`SpeechEnded` events from VAD; PTT still works |
+| `without_vad()` | No `SpeechStarted`/`SpeechEnded` events from VAD; manual recording still works |
+
+---
+
+## Device Testing
+
+Use `start_test_capture` to measure audio input levels on a device before starting
+a full capture session. Level updates are emitted as `AudioLevelUpdate` events.
+
+```rust
+use vtx_engine::{EngineBuilder, EngineEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, mut rx) = EngineBuilder::new()
+        .without_transcription()
+        .without_vad()
+        .without_visualization()
+        .build()
+        .await?;
+
+    let devices = engine.list_input_devices();
+    let device_id = devices.first().map(|d| d.id.clone()).ok_or("No devices")?;
+
+    engine.start_test_capture(device_id.clone())?;
+
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            if let EngineEvent::AudioLevelUpdate { device_id, level_db } = event {
+                println!("[{}] {:.1} dB", device_id, level_db);
+            }
+        }
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    engine.stop_test_capture()?;
+
+    Ok(())
+}
+```
+
+---
+
+## `AudioEngine` API Reference
+
+| Method | Description |
+|---|---|
+| `list_input_devices()` | List available microphone/input devices |
+| `list_system_devices()` | List available system audio (loopback/monitor) devices |
+| `start_capture(source1, source2)` | Start capture from primary (and optional secondary) source |
+| `stop_capture()` | Stop audio capture |
+| `is_capturing()` | Whether audio capture is currently active |
+| `subscribe()` | Obtain an additional broadcast receiver |
+| `start_recording()` | Begin manual recording session |
+| `stop_recording()` | Stop and submit manual recording for transcription |
+| `is_recording()` | Whether a manual recording session is active |
+| `get_last_recording_path()` | Path to the most recently saved recording WAV, if any |
+| `finalize_segment()` | Stop recording (if active) or finalize the current VAD segment |
+| `play_file(path, ptt_mode)` | Route a WAV file through the engine pipeline |
+| `is_playing_back()` | Whether file playback is active |
+| `stop_playback()` | Cancel active file playback |
+| `transcribe_audio_file(path)` | Load a WAV, resample, and transcribe; returns `Vec<TranscriptionSegment>` |
+| `transcribe_audio_stream(rx, start)` | Transcribe a channel of 16 kHz mono f32 PCM frames |
+| `set_transcription_enabled(bool)` | Enable/disable real-time transcription without stopping capture |
+| `is_transcription_enabled()` | Whether real-time transcription is currently enabled |
+| `check_model_status()` | Check whether the configured Whisper model file is available |
+| `check_gpu_status()` | Check CUDA/Metal acceleration status |
+| `get_status()` | Current engine status snapshot |
+| `start_test_capture(device_id)` | Start a lightweight level-reporting capture on a device |
+| `stop_test_capture()` | Stop any active test capture |
+| `shutdown()` | Request engine shutdown (also called automatically on `Drop`) |
 
 ---
 
@@ -415,7 +640,6 @@ All fields can be set via `EngineBuilder` setters or by constructing `EngineConf
 | `model` | `WhisperModel` | `BaseEn` | Whisper model to use for transcription |
 | `model_path` | `Option<PathBuf>` | `None` | **Deprecated** — explicit path override; takes precedence over `model` |
 | `recording_mode` | `RecordingMode` | `Mixed` | `Mixed`: mix sources; `EchoCancel`: AEC on primary source |
-| `transcription_mode` | `TranscriptionMode` | `Automatic` | `Automatic`: VAD-driven; `PushToTalk`: manual press/release |
 | `vad_voiced_threshold_db` | `f32` | `-42.0` | Voiced speech detection threshold in dB |
 | `vad_whisper_threshold_db` | `f32` | `-52.0` | Whisper/soft speech detection threshold in dB |
 | `vad_voiced_onset_ms` | `u64` | `80` | Minimum voiced speech duration to confirm onset (ms) |
@@ -429,6 +653,30 @@ All fields can be set via `EngineBuilder` setters or by constructing `EngineConf
 
 ---
 
+## `EngineBuilder` Setters
+
+| Setter | Description |
+|---|---|
+| `app_name(name)` | Set the application name for data directory resolution (default: `"vtx-engine"`) |
+| `with_profile(profile)` | Apply a `TranscriptionProfile` preset |
+| `model(model)` | Set Whisper model variant |
+| `recording_mode(mode)` | Set `RecordingMode` |
+| `vad_voiced_threshold_db(db)` | Set voiced speech threshold |
+| `vad_whisper_threshold_db(db)` | Set whisper speech threshold |
+| `vad_voiced_onset_ms(ms)` | Set voiced onset duration |
+| `vad_whisper_onset_ms(ms)` | Set whisper onset duration |
+| `segment_max_duration_ms(ms)` | Set maximum segment duration |
+| `segment_word_break_grace_ms(ms)` | Set word-break grace period |
+| `segment_lookback_ms(ms)` | Set lookback buffer duration |
+| `transcription_queue_capacity(n)` | Set transcription queue depth |
+| `viz_frame_interval_ms(ms)` | Set visualization frame interval |
+| `word_break_segmentation_enabled(bool)` | Enable/disable word-break segmentation |
+| `without_transcription()` | Disable transcription subsystem |
+| `without_visualization()` | Disable visualization subsystem |
+| `without_vad()` | Disable VAD subsystem |
+
+---
+
 ## Local Development Against an Unpublished Version
 
 When you need to make changes to vtx-engine and test them in your application
@@ -437,41 +685,39 @@ simultaneously — without publishing to crates.io — use Cargo's
 mechanism.
 
 In your **application's** root `Cargo.toml`, add a `[patch.crates-io]` table
-that points both crates at their local paths:
+that points the crate at its local path:
 
 ```toml
 # my-app/Cargo.toml
 
 [dependencies]
 vtx-engine = "0.1"
-vtx-common = "0.1"
 
 # --- Local development override ---
 # Point at a local checkout of vtx-engine while iterating on the library.
 # Remove this section before committing or cutting a release.
 [patch.crates-io]
 vtx-engine = { path = "../vtx-engine/crates/vtx-engine" }
-vtx-common  = { path = "../vtx-engine/crates/vtx-common" }
 ```
 
-Adjust the relative paths so they resolve correctly from your application's
+Adjust the relative path so it resolves correctly from your application's
 workspace root. `[patch.crates-io]` must be declared at the workspace root
 (the `Cargo.toml` that contains `[workspace]`), not in an individual crate.
 
 ### How it works
 
-Cargo replaces the crates.io versions of `vtx-engine` and `vtx-common` with the
-local source tree for every build in the workspace. The version declared in
-`[dependencies]` is still checked for compatibility with the local crate's
-`[package] version`, so keep them in sync. No other changes to your code are
-required — `use vtx_engine::...` imports continue to work unchanged.
+Cargo replaces the crates.io version of `vtx-engine` with the local source tree
+for every build in the workspace. The version declared in `[dependencies]` is
+still checked for compatibility with the local crate's `[package] version`, so
+keep them in sync. No other changes to your code are required — `use vtx_engine::...`
+imports continue to work unchanged.
 
 ### Workflow
 
 ```
 my-app/                         vtx-engine/
   Cargo.toml  ──[patch]──▶        crates/vtx-engine/
-  src/                            crates/vtx-common/
+  src/
 ```
 
 1. Edit vtx-engine source normally.
