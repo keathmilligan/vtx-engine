@@ -512,17 +512,32 @@ interface BufferedMetric {
   isWordBreak: boolean;
 }
 
-/** A segment-submission marker stored by ring-buffer write index. */
+/** A segment-submission marker keyed by absolute frame index. */
 interface SegmentMarker {
-  /** The ring-buffer writeIndex at the moment of submission. */
-  ringIndex: number;
-  /** Whether the ring buffer was already full (filled=true) when marked. */
-  wasFilled: boolean;
+  /** Absolute frame index (value of totalFrames) at submission time. */
+  frameIndex: number;
+}
+
+/** A slice of history-buffer data for one draw frame. */
+interface VisibleSlice {
+  amplitude: Float32Array;
+  zcr: Float32Array;
+  centroid: Float32Array;
+  speaking: Uint8Array;
+  lookback: Uint8Array;
+  voicedPending: Uint8Array;
+  whisperPending: Uint8Array;
+  transient: Uint8Array;
+  wordBreak: Uint8Array;
+  /** Index in history arrays where this slice starts (before zero-padding). */
+  startIndex: number;
 }
 
 /**
  * Multi-metric overlay showing speech detection algorithm components:
  * amplitude, ZCR, centroid as line graphs, plus speech state bar.
+ *
+ * Supports scrolling backward through history via mouse wheel or pointer drag.
  */
 export class SpeechActivityRenderer {
   private canvas: HTMLCanvasElement;
@@ -530,25 +545,54 @@ export class SpeechActivityRenderer {
   private animationId: number | null = null;
   private isActive = false;
 
-  private amplitudeBuffer: Float32Array;
-  private zcrBuffer: Float32Array;
-  private centroidBuffer: Float32Array;
-  private speakingBuffer: Uint8Array;
-  private lookbackSpeechBuffer: Uint8Array;
-  private voicedPendingBuffer: Uint8Array;
-  private whisperPendingBuffer: Uint8Array;
-  private transientBuffer: Uint8Array;
-  private wordBreakBuffer: Uint8Array;
+  // ---------------------------------------------------------------------------
+  // History buffers (append-only, grow up to maxHistoryFrames)
+  // ---------------------------------------------------------------------------
+  private histAmplitude: Float32Array;
+  private histZcr: Float32Array;
+  private histCentroid: Float32Array;
+  private histSpeaking: Uint8Array;
+  private histLookback: Uint8Array;
+  private histVoicedPending: Uint8Array;
+  private histWhisperPending: Uint8Array;
+  private histTransient: Uint8Array;
+  private histWordBreak: Uint8Array;
 
-  private bufferSize: number;
-  private writeIndex = 0;
-  private filled = false;
+  /** How many frames have been written into the history arrays. */
+  private totalFrames = 0;
 
+  /** Maximum frames to keep in history before front-trimming. */
+  private readonly maxHistoryFrames: number;
+
+  /** Visible window width in frames. */
+  private readonly bufferSize: number;
+
+  // ---------------------------------------------------------------------------
+  // Scroll state
+  // ---------------------------------------------------------------------------
+  /** Frames from the live head the view is anchored. 0 = live edge. */
+  private scrollOffset = 0;
+
+  // ---------------------------------------------------------------------------
+  // Interaction state (sub-frame accumulator for smooth wheel/drag scrolling)
+  // ---------------------------------------------------------------------------
+  /** Fractional frame accumulator — shared by wheel and drag handlers in main.ts. */
+  scrollAccum = 0;
+
+  // ---------------------------------------------------------------------------
+  // Delay buffer (preserved for lookback support)
+  // ---------------------------------------------------------------------------
   private readonly delayBufferSize = 20;
   private delayBuffer: BufferedMetric[] = [];
 
-  /** Circular list of segment-submission markers (ring-buffer indices). */
+  /** Segment-submission markers keyed by absolute frame index. */
   private segmentMarkers: SegmentMarker[] = [];
+
+  // ---------------------------------------------------------------------------
+  // Frame interval for dynamic x-axis labels
+  // ---------------------------------------------------------------------------
+  /** Expected milliseconds between visualization frames (default 16 ms). */
+  frameIntervalMs = 16;
 
   private readonly leftMargin = 40;
   private readonly rightMargin = 8;
@@ -562,25 +606,35 @@ export class SpeechActivityRenderer {
   private readonly voicedThresholdDb = -40;
   private readonly whisperThresholdDb = -50;
 
-  constructor(canvas: HTMLCanvasElement, bufferSize = 256) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    bufferSize = 256,
+    maxHistoryFrames = 108_000
+  ) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Could not get canvas 2D context");
     this.ctx = ctx;
     this.bufferSize = bufferSize;
+    this.maxHistoryFrames = Math.max(maxHistoryFrames, bufferSize * 2);
 
-    this.amplitudeBuffer = new Float32Array(bufferSize);
-    this.zcrBuffer = new Float32Array(bufferSize);
-    this.centroidBuffer = new Float32Array(bufferSize);
-    this.speakingBuffer = new Uint8Array(bufferSize);
-    this.lookbackSpeechBuffer = new Uint8Array(bufferSize);
-    this.voicedPendingBuffer = new Uint8Array(bufferSize);
-    this.whisperPendingBuffer = new Uint8Array(bufferSize);
-    this.transientBuffer = new Uint8Array(bufferSize);
-    this.wordBreakBuffer = new Uint8Array(bufferSize);
+    // Allocate history arrays at max capacity up front to avoid reallocation.
+    this.histAmplitude = new Float32Array(this.maxHistoryFrames);
+    this.histZcr = new Float32Array(this.maxHistoryFrames);
+    this.histCentroid = new Float32Array(this.maxHistoryFrames);
+    this.histSpeaking = new Uint8Array(this.maxHistoryFrames);
+    this.histLookback = new Uint8Array(this.maxHistoryFrames);
+    this.histVoicedPending = new Uint8Array(this.maxHistoryFrames);
+    this.histWhisperPending = new Uint8Array(this.maxHistoryFrames);
+    this.histTransient = new Uint8Array(this.maxHistoryFrames);
+    this.histWordBreak = new Uint8Array(this.maxHistoryFrames);
 
     this.setupCanvas();
   }
+
+  // ---------------------------------------------------------------------------
+  // Setup
+  // ---------------------------------------------------------------------------
 
   private setupCanvas(): void {
     const dpr = window.devicePixelRatio || 1;
@@ -589,6 +643,52 @@ export class SpeechActivityRenderer {
     this.canvas.height = rect.height * dpr;
     this.ctx.scale(dpr, dpr);
   }
+
+  // (Interaction handlers are wired externally in main.ts via the public scroll API.)
+
+  // ---------------------------------------------------------------------------
+  // Public scroll API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Adjust scroll offset by `deltaFrames`. Positive moves into history;
+   * negative moves toward the live edge. Clamped to valid range.
+   * Triggers a redraw when the renderer is stopped (no active rAF loop).
+   */
+  scrollBy(deltaFrames: number): void {
+    const maxOffset = Math.max(0, this.totalFrames - this.bufferSize);
+    const prev = this.scrollOffset;
+    this.scrollOffset = Math.max(
+      0,
+      Math.min(this.scrollOffset + deltaFrames, maxOffset)
+    );
+    if (this.scrollOffset !== prev && !this.isActive) {
+      this.draw();
+    }
+  }
+
+  /** Snap back to the live edge. Triggers a redraw when the renderer is stopped. */
+  resetToLive(): void {
+    const prev = this.scrollOffset;
+    this.scrollOffset = 0;
+    if (this.scrollOffset !== prev && !this.isActive) {
+      this.draw();
+    }
+  }
+
+  /** True when the view is pinned to the live (rightmost) edge. */
+  get isLive(): boolean {
+    return this.scrollOffset === 0;
+  }
+
+  /** The visible window width in frames (used by external scroll handlers). */
+  get bufferFrames(): number {
+    return this.bufferSize;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data ingestion
+  // ---------------------------------------------------------------------------
 
   pushMetrics(metrics: SpeechMetrics): void {
     const normalizedAmplitude = Math.max(
@@ -620,26 +720,72 @@ export class SpeechActivityRenderer {
 
     if (this.delayBuffer.length > this.delayBufferSize) {
       const oldest = this.delayBuffer.shift()!;
-      this.transferToRingBuffer(oldest);
+      this.appendToHistory(oldest);
     }
   }
 
-  private transferToRingBuffer(metric: BufferedMetric): void {
-    this.amplitudeBuffer[this.writeIndex] = metric.amplitude;
-    this.zcrBuffer[this.writeIndex] = metric.zcr;
-    this.centroidBuffer[this.writeIndex] = metric.centroid;
-    this.speakingBuffer[this.writeIndex] = metric.speaking ? 1 : 0;
-    this.lookbackSpeechBuffer[this.writeIndex] = metric.isLookbackSpeech
-      ? 1
-      : 0;
-    this.voicedPendingBuffer[this.writeIndex] = metric.voicedPending ? 1 : 0;
-    this.whisperPendingBuffer[this.writeIndex] = metric.whisperPending ? 1 : 0;
-    this.transientBuffer[this.writeIndex] = metric.transient ? 1 : 0;
-    this.wordBreakBuffer[this.writeIndex] = metric.isWordBreak ? 1 : 0;
+  private appendToHistory(metric: BufferedMetric): void {
+    // If at cap, trim the front by one bufferSize chunk to amortize cost.
+    if (this.totalFrames >= this.maxHistoryFrames) {
+      this.trimHistory(this.bufferSize);
+    }
 
-    this.writeIndex = (this.writeIndex + 1) % this.bufferSize;
-    if (this.writeIndex === 0) this.filled = true;
+    const i = this.totalFrames;
+    this.histAmplitude[i] = metric.amplitude;
+    this.histZcr[i] = metric.zcr;
+    this.histCentroid[i] = metric.centroid;
+    this.histSpeaking[i] = metric.speaking ? 1 : 0;
+    this.histLookback[i] = metric.isLookbackSpeech ? 1 : 0;
+    this.histVoicedPending[i] = metric.voicedPending ? 1 : 0;
+    this.histWhisperPending[i] = metric.whisperPending ? 1 : 0;
+    this.histTransient[i] = metric.transient ? 1 : 0;
+    this.histWordBreak[i] = metric.isWordBreak ? 1 : 0;
+
+    this.totalFrames += 1;
   }
+
+  /**
+   * Drop the oldest `count` frames from the history by shifting arrays left.
+   * Segment marker frameIndices remain valid because they reference absolute
+   * frame counts stored separately — but we need to subtract `count` from each
+   * so they still point to the correct relative position after trimming.
+   *
+   * We keep a running `trimTotal` to avoid adjusting absolute indices directly:
+   * instead, marker.frameIndex is always relative to the *current* history head.
+   * After trimming, re-anchor all markers.
+   */
+  private trimHistory(count: number): void {
+    const keep = this.totalFrames - count;
+    if (keep <= 0) {
+      this.totalFrames = 0;
+      this.scrollOffset = 0;
+      return;
+    }
+
+    this.histAmplitude.copyWithin(0, count, this.totalFrames);
+    this.histZcr.copyWithin(0, count, this.totalFrames);
+    this.histCentroid.copyWithin(0, count, this.totalFrames);
+    this.histSpeaking.copyWithin(0, count, this.totalFrames);
+    this.histLookback.copyWithin(0, count, this.totalFrames);
+    this.histVoicedPending.copyWithin(0, count, this.totalFrames);
+    this.histWhisperPending.copyWithin(0, count, this.totalFrames);
+    this.histTransient.copyWithin(0, count, this.totalFrames);
+    this.histWordBreak.copyWithin(0, count, this.totalFrames);
+
+    this.totalFrames = keep;
+
+    // Adjust scroll offset so the viewed position stays the same.
+    this.scrollOffset = Math.max(0, this.scrollOffset - count);
+
+    // Adjust segment markers; remove any that were trimmed away.
+    this.segmentMarkers = this.segmentMarkers
+      .map((m) => ({ frameIndex: m.frameIndex - count }))
+      .filter((m) => m.frameIndex >= 0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
 
   start(): void {
     if (this.isActive) return;
@@ -653,6 +799,8 @@ export class SpeechActivityRenderer {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
     }
+    // Redraw once so the LIVE indicator (which only shows while active) is erased.
+    this.draw();
   }
 
   get active(): boolean {
@@ -661,39 +809,30 @@ export class SpeechActivityRenderer {
 
   /**
    * Record a segment-submission marker at the current visualization position.
-   * Call this when audio is split and submitted to the transcription queue
-   * (e.g. on the speech-ended event in auto-transcription mode).
-   *
-   * The marker accounts for the delay buffer: frames still pending in the
-   * delay buffer have not yet been committed to the ring buffer, so the
-   * effective "now" position is `writeIndex` (the next slot to be written).
-   * When drawn, this naturally lands at the rightmost visible position of
-   * already-committed data, which is exactly when speech ended.
+   * The absolute frame index is stored so the marker survives indefinitely,
+   * rendering at the correct position regardless of scroll offset.
    */
   markSegmentSubmitted(): void {
-    this.segmentMarkers.push({
-      ringIndex: this.writeIndex,
-      wasFilled: this.filled,
-    });
-    // Keep at most bufferSize markers to avoid unbounded growth
-    if (this.segmentMarkers.length > this.bufferSize) {
+    this.segmentMarkers.push({ frameIndex: this.totalFrames });
+    // Keep no more than a reasonable maximum to prevent unbounded growth.
+    if (this.segmentMarkers.length > this.maxHistoryFrames / this.bufferSize + 1) {
       this.segmentMarkers.shift();
     }
   }
 
   clear(): void {
-    this.amplitudeBuffer.fill(0);
-    this.zcrBuffer.fill(0);
-    this.centroidBuffer.fill(0);
-    this.speakingBuffer.fill(0);
-    this.lookbackSpeechBuffer.fill(0);
-    this.voicedPendingBuffer.fill(0);
-    this.whisperPendingBuffer.fill(0);
-    this.transientBuffer.fill(0);
-    this.wordBreakBuffer.fill(0);
+    this.histAmplitude.fill(0);
+    this.histZcr.fill(0);
+    this.histCentroid.fill(0);
+    this.histSpeaking.fill(0);
+    this.histLookback.fill(0);
+    this.histVoicedPending.fill(0);
+    this.histWhisperPending.fill(0);
+    this.histTransient.fill(0);
+    this.histWordBreak.fill(0);
+    this.totalFrames = 0;
+    this.scrollOffset = 0;
     this.delayBuffer = [];
-    this.writeIndex = 0;
-    this.filled = false;
     this.segmentMarkers = [];
     this.drawIdle();
   }
@@ -712,19 +851,71 @@ export class SpeechActivityRenderer {
     this.drawGrid(width, height);
   }
 
+  // ---------------------------------------------------------------------------
+  // Animation loop
+  // ---------------------------------------------------------------------------
+
   private animate = (): void => {
     if (!this.isActive) return;
     this.draw();
     this.animationId = requestAnimationFrame(this.animate);
   };
 
-  private getSamplesInOrder<T extends Float32Array | Uint8Array>(buffer: T): T {
-    if (!this.filled) return buffer.slice(0, this.writeIndex) as T;
-    const result = new (buffer.constructor as any)(buffer.length);
-    result.set(buffer.slice(this.writeIndex), 0);
-    result.set(buffer.slice(0, this.writeIndex), buffer.length - this.writeIndex);
-    return result;
+  // ---------------------------------------------------------------------------
+  // Visible-slice helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Return typed-array slices of exactly `bufferSize` frames representing the
+   * currently visible window: from `startIndex` to `startIndex + bufferSize`.
+   * If the window extends before the start of recorded history the left portion
+   * is zero-padded (typed arrays default to zero so the slice is naturally
+   * padded when `startIndex < 0`).
+   */
+  private getVisibleSlice(): VisibleSlice {
+    const bs = this.bufferSize;
+    // The rightmost visible frame is `totalFrames - 1 - scrollOffset`.
+    // The leftmost visible frame is that minus (bufferSize - 1).
+    const rightFrame = this.totalFrames - 1 - this.scrollOffset;
+    const leftFrame = rightFrame - (bs - 1);
+    const startIndex = Math.max(0, leftFrame);
+    const endIndex = Math.max(0, rightFrame + 1); // exclusive
+
+    const available = endIndex - startIndex; // may be < bufferSize
+    const pad = bs - available; // frames to zero-pad on the left
+
+    const amplitude = new Float32Array(bs);
+    const zcr = new Float32Array(bs);
+    const centroid = new Float32Array(bs);
+    const speaking = new Uint8Array(bs);
+    const lookback = new Uint8Array(bs);
+    const voicedPending = new Uint8Array(bs);
+    const whisperPending = new Uint8Array(bs);
+    const transient = new Uint8Array(bs);
+    const wordBreak = new Uint8Array(bs);
+
+    if (available > 0) {
+      amplitude.set(this.histAmplitude.subarray(startIndex, endIndex), pad);
+      zcr.set(this.histZcr.subarray(startIndex, endIndex), pad);
+      centroid.set(this.histCentroid.subarray(startIndex, endIndex), pad);
+      speaking.set(this.histSpeaking.subarray(startIndex, endIndex), pad);
+      lookback.set(this.histLookback.subarray(startIndex, endIndex), pad);
+      voicedPending.set(this.histVoicedPending.subarray(startIndex, endIndex), pad);
+      whisperPending.set(this.histWhisperPending.subarray(startIndex, endIndex), pad);
+      transient.set(this.histTransient.subarray(startIndex, endIndex), pad);
+      wordBreak.set(this.histWordBreak.subarray(startIndex, endIndex), pad);
+    }
+
+    return {
+      amplitude, zcr, centroid, speaking, lookback,
+      voicedPending, whisperPending, transient, wordBreak,
+      startIndex,
+    };
   }
+
+  // ---------------------------------------------------------------------------
+  // Draw
+  // ---------------------------------------------------------------------------
 
   private draw(): void {
     const dpr = window.devicePixelRatio || 1;
@@ -737,21 +928,13 @@ export class SpeechActivityRenderer {
     this.ctx.fillRect(0, 0, width, height);
     this.drawGrid(width, height);
 
-    const amplitudes = this.getSamplesInOrder(this.amplitudeBuffer);
-    const zcrs = this.getSamplesInOrder(this.zcrBuffer);
-    const centroids = this.getSamplesInOrder(this.centroidBuffer);
-    const speaking = this.getSamplesInOrder(this.speakingBuffer);
-    const lookback = this.getSamplesInOrder(this.lookbackSpeechBuffer);
-    const wordBreaks = this.getSamplesInOrder(this.wordBreakBuffer);
-    const voiced = this.getSamplesInOrder(this.voicedPendingBuffer);
-    const whisper = this.getSamplesInOrder(this.whisperPendingBuffer);
-    const transients = this.getSamplesInOrder(this.transientBuffer);
+    if (this.totalFrames === 0) return;
 
-    if (amplitudes.length === 0) return;
+    const slice = this.getVisibleSlice();
 
     // Speech bar (top)
     const speechBarHeight = area.height * 0.08;
-    this.drawSpeechBar(speaking, lookback, area);
+    this.drawSpeechBar(slice.speaking, slice.lookback, area);
 
     // Word break indicator bar (just below speaking bar)
     const wordBreakBarHeight = area.height * 0.08;
@@ -761,7 +944,7 @@ export class SpeechActivityRenderer {
       width: area.width,
       height: wordBreakBarHeight,
     };
-    this.drawWordBreakBars(wordBreaks, speaking, wordBreakArea);
+    this.drawWordBreakBars(slice.wordBreak, slice.speaking, wordBreakArea);
 
     // Metric lines and state markers use the area below both bars
     const barsHeight = speechBarHeight + wordBreakBarHeight;
@@ -774,40 +957,43 @@ export class SpeechActivityRenderer {
 
     // Metric lines
     this.drawMetricLine(
-      amplitudes,
+      slice.amplitude,
       metricsArea,
       cssVar("--vtx-metric-amplitude", "rgba(245,158,11,0.75)")
     );
     this.drawMetricLine(
-      zcrs,
+      slice.zcr,
       metricsArea,
       cssVar("--vtx-metric-zcr", "rgba(6,182,212,0.75)")
     );
     this.drawMetricLine(
-      centroids,
+      slice.centroid,
       metricsArea,
       cssVar("--vtx-metric-centroid", "rgba(217,70,239,0.75)")
     );
 
     // State markers
     this.drawStateMarkers(
-      voiced,
+      slice.voicedPending,
       metricsArea,
       cssVar("--vtx-marker-voiced", "rgba(34,197,94,0.7)")
     );
     this.drawStateMarkers(
-      whisper,
+      slice.whisperPending,
       metricsArea,
       cssVar("--vtx-marker-whisper", "rgba(59,130,246,0.7)")
     );
     this.drawStateMarkers(
-      transients,
+      slice.transient,
       metricsArea,
       cssVar("--vtx-marker-transient", "rgba(239,68,68,0.7)")
     );
 
     // Segment-submission markers (drawn on top)
     this.drawSegmentMarkers(area);
+
+    // Scroll indicator (topmost layer)
+    this.drawScrollIndicator(area);
   }
 
   private getDrawableArea() {
@@ -822,21 +1008,19 @@ export class SpeechActivityRenderer {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Sub-draw methods (all operate on full-bufferSize slices)
+  // ---------------------------------------------------------------------------
+
   private drawSpeechBar(
     speaking: Uint8Array,
     lookback: Uint8Array,
     area: { x: number; y: number; width: number; height: number }
   ): void {
     const barHeight = area.height * 0.08;
-    const offset = this.bufferSize - speaking.length;
-    const confirmed = cssVar(
-      "--vtx-speech-confirmed",
-      "rgba(34,197,94,0.5)"
-    );
-    const lookbackColor = cssVar(
-      "--vtx-speech-lookback",
-      "rgba(59,130,246,0.7)"
-    );
+    const bs = this.bufferSize;
+    const confirmed = cssVar("--vtx-speech-confirmed", "rgba(34,197,94,0.5)");
+    const lookbackColor = cssVar("--vtx-speech-lookback", "rgba(59,130,246,0.7)");
 
     // Lookback regions
     this.ctx.fillStyle = lookbackColor;
@@ -844,7 +1028,7 @@ export class SpeechActivityRenderer {
     let startX = 0;
     for (let i = 0; i <= lookback.length; i++) {
       const isLb = i < lookback.length && lookback[i] === 1;
-      const x = area.x + ((offset + i) / this.bufferSize) * area.width;
+      const x = area.x + (i / bs) * area.width;
       if (isLb && !inLookback) {
         inLookback = true;
         startX = x;
@@ -862,7 +1046,7 @@ export class SpeechActivityRenderer {
         i < speaking.length &&
         speaking[i] === 1 &&
         !(i < lookback.length && lookback[i] === 1);
-      const x = area.x + ((offset + i) / this.bufferSize) * area.width;
+      const x = area.x + (i / bs) * area.width;
       if (isSp && !inSpeech) {
         inSpeech = true;
         startX = x;
@@ -879,7 +1063,7 @@ export class SpeechActivityRenderer {
     area: { x: number; y: number; width: number; height: number }
   ): void {
     const barHeight = area.height;
-    const offset = this.bufferSize - wordBreaks.length;
+    const bs = this.bufferSize;
     this.ctx.strokeStyle = cssVar(
       "--vtx-speech-word-break",
       "rgba(249,115,22,0.85)"
@@ -887,12 +1071,8 @@ export class SpeechActivityRenderer {
     this.ctx.lineWidth = 2;
 
     for (let i = 0; i < wordBreaks.length; i++) {
-      if (
-        wordBreaks[i] === 1 &&
-        i < speaking.length &&
-        speaking[i] === 1
-      ) {
-        const x = area.x + ((offset + i) / this.bufferSize) * area.width;
+      if (wordBreaks[i] === 1 && i < speaking.length && speaking[i] === 1) {
+        const x = area.x + (i / bs) * area.width;
         this.ctx.beginPath();
         this.ctx.moveTo(x, area.y);
         this.ctx.lineTo(x, area.y + barHeight);
@@ -911,10 +1091,9 @@ export class SpeechActivityRenderer {
     this.ctx.strokeStyle = color;
     this.ctx.lineWidth = 1;
 
+    const bs = this.bufferSize;
     for (let i = 0; i < values.length; i++) {
-      const x =
-        area.x +
-        ((this.bufferSize - values.length + i) / this.bufferSize) * area.width;
+      const x = area.x + (i / bs) * area.width;
       const y = area.y + area.height - values[i] * area.height;
       if (i === 0) this.ctx.moveTo(x, y);
       else this.ctx.lineTo(x, y);
@@ -929,12 +1108,10 @@ export class SpeechActivityRenderer {
   ): void {
     if (states.length === 0) return;
     this.ctx.fillStyle = color;
+    const bs = this.bufferSize;
     for (let i = 0; i < states.length; i++) {
       if (states[i] === 1) {
-        const x =
-          area.x +
-          ((this.bufferSize - states.length + i) / this.bufferSize) *
-            area.width;
+        const x = area.x + (i / bs) * area.width;
         const y = area.y + area.height - 4;
         this.ctx.beginPath();
         this.ctx.arc(x, y, 2, 0, Math.PI * 2);
@@ -949,36 +1126,20 @@ export class SpeechActivityRenderer {
     if (this.segmentMarkers.length === 0) return;
 
     const color = cssVar("--vtx-segment-marker", "rgba(255,255,255,0.85)");
+    const bs = this.bufferSize;
 
-    // Determine the range of ring-buffer slots currently visible.
-    // getSamplesInOrder() returns samples in chronological order from oldest
-    // to newest, spanning bufferSize slots.  The rightmost pixel corresponds
-    // to the slot just before writeIndex (i.e. writeIndex - 1 mod bufferSize),
-    // and the leftmost pixel corresponds to writeIndex (when filled) or slot 0
-    // (when not yet filled).
-    //
-    // To convert a stored marker ringIndex to an X pixel:
-    //   visibleLength = filled ? bufferSize : writeIndex
-    //   slotAge = (writeIndex - markerRingIndex + bufferSize) % bufferSize
-    //   if slotAge > visibleLength => marker has scrolled off left edge
-    //   normalizedPos = (visibleLength - slotAge) / bufferSize
-    //   x = area.x + normalizedPos * area.width
-    const visibleLength = this.filled ? this.bufferSize : this.writeIndex;
-
-    const markersToKeep: SegmentMarker[] = [];
+    // The rightmost visible absolute frame index.
+    const rightFrame = this.totalFrames - 1 - this.scrollOffset;
 
     for (const marker of this.segmentMarkers) {
-      const slotAge =
-        (this.writeIndex - marker.ringIndex + this.bufferSize) %
-        this.bufferSize;
+      // How many frames ago relative to the right edge is this marker?
+      const slotOffset = rightFrame - marker.frameIndex;
 
-      // Discard markers that have scrolled completely off the left edge
-      if (slotAge > visibleLength) continue;
+      // Skip if outside the visible window.
+      if (slotOffset < 0 || slotOffset >= bs) continue;
 
-      markersToKeep.push(marker);
-
-      const normalizedPos = (visibleLength - slotAge) / this.bufferSize;
-      const x = area.x + normalizedPos * area.width;
+      // Convert to canvas X: rightmost = area.x + area.width, oldest = area.x.
+      const x = area.x + ((bs - 1 - slotOffset) / (bs - 1)) * area.width;
 
       // Full-height vertical dashed line
       this.ctx.save();
@@ -992,7 +1153,7 @@ export class SpeechActivityRenderer {
       this.ctx.setLineDash([]);
       this.ctx.restore();
 
-      // Small downward-pointing triangle at the top to indicate "submitted"
+      // Small downward-pointing triangle at the top
       const triSize = 5;
       this.ctx.save();
       this.ctx.fillStyle = color;
@@ -1004,9 +1165,41 @@ export class SpeechActivityRenderer {
       this.ctx.fill();
       this.ctx.restore();
     }
+  }
 
-    // Prune markers that have scrolled off
-    this.segmentMarkers = markersToKeep;
+  private drawScrollIndicator(
+    area: { x: number; y: number; width: number; height: number }
+  ): void {
+    const dpr = window.devicePixelRatio || 1;
+    const width = this.canvas.width / dpr;
+
+    const textColor = cssVar("--vtx-waveform-text", "rgba(255,255,255,0.5)");
+    this.ctx.font = "bold 10px system-ui, sans-serif";
+    this.ctx.textBaseline = "top";
+
+    if (this.scrollOffset === 0 && this.isActive) {
+      // "● LIVE" pill in green — only while the renderer is actively receiving data
+      const label = "\u25CF LIVE";
+      this.ctx.fillStyle = "rgba(34,197,94,0.9)";
+      const textWidth = this.ctx.measureText(label).width;
+      const padX = 5;
+      const padY = 3;
+      const pillW = textWidth + padX * 2;
+      const pillH = 14;
+      const pillX = width - this.rightMargin - pillW - 2;
+      const pillY = this.topMargin + 2;
+      this.ctx.fillRect(pillX - padX, pillY - padY, pillW + padX, pillH);
+      this.ctx.fillStyle = "#fff";
+      this.ctx.textAlign = "left";
+      this.ctx.fillText(label, pillX, pillY);
+    } else if (this.scrollOffset > 0) {
+      // "◀ -Xs" label in muted color
+      const seconds = (this.scrollOffset * this.frameIntervalMs / 1000).toFixed(1);
+      const label = `\u25C4 -${seconds}s`;
+      this.ctx.fillStyle = textColor;
+      this.ctx.textAlign = "right";
+      this.ctx.fillText(label, width - this.rightMargin - 2, this.topMargin + 2);
+    }
   }
 
   private drawGrid(width: number, height: number): void {
@@ -1067,22 +1260,27 @@ export class SpeechActivityRenderer {
     this.ctx.textAlign = "right";
     this.ctx.textBaseline = "middle";
     for (const db of [0, -20, -40, -50, -60]) {
-      const normalizedY =
-        (db - this.minDb) / (this.maxDb - this.minDb);
+      const normalizedY = (db - this.minDb) / (this.maxDb - this.minDb);
       const y = this.topMargin + graphHeight - normalizedY * graphHeight;
-      const label =
-        db === -40 ? "-40V" : db === -50 ? "-50W" : `${db}`;
+      const label = db === -40 ? "-40V" : db === -50 ? "-50W" : `${db}`;
       this.ctx.fillText(label, this.leftMargin - 3, y);
     }
 
-    // X-axis labels
+    // X-axis labels — computed dynamically from frame interval and scroll offset
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "top";
-    const timeLabels = ["-2.5s", "-2s", "-1.5s", "-1s", "-0.5s", "0"];
-    for (let i = 0; i < timeLabels.length; i++) {
-      const x =
-        this.leftMargin + (graphWidth / (timeLabels.length - 1)) * i;
-      this.ctx.fillText(timeLabels[i], x, this.topMargin + graphHeight + 4);
+    const numLabels = 6;
+    for (let i = 0; i < numLabels; i++) {
+      // Column index within the bufferSize window, evenly spaced.
+      const colIndex = Math.round(((this.bufferSize - 1) / (numLabels - 1)) * i);
+      // Time relative to the live head (negative = in the past).
+      const t =
+        -(this.bufferSize - 1 - colIndex + this.scrollOffset) *
+        this.frameIntervalMs /
+        1000;
+      const label = `${t.toFixed(1)}s`;
+      const x = this.leftMargin + (graphWidth / (numLabels - 1)) * i;
+      this.ctx.fillText(label, x, this.topMargin + graphHeight + 4);
     }
   }
 }

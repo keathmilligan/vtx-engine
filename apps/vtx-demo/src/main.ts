@@ -196,6 +196,9 @@ const aecToggle = document.getElementById(
   "aec-toggle"
 ) as HTMLInputElement;
 const transcriptionOutput = document.getElementById("transcription-output")!;
+const btnScrollBack = document.getElementById("btn-scroll-back") as HTMLButtonElement;
+const btnScrollFwd = document.getElementById("btn-scroll-fwd") as HTMLButtonElement;
+const btnScrollLive = document.getElementById("btn-scroll-live") as HTMLButtonElement;
 
 // =============================================================================
 // Document Model
@@ -294,12 +297,104 @@ function setupRenderers() {
   spectrogramRenderer.drawIdle();
   speechActivityRenderer.drawIdle();
 
+  // Wire scroll interactions on the speech activity canvas.
+  setupSpeechActivityScroll(speechCanvas);
+
   // Handle window resize
   window.addEventListener("resize", () => {
     waveformRenderer.resize();
     spectrogramRenderer.resize();
     speechActivityRenderer.resize();
   });
+}
+
+/**
+ * Wire wheel and pointer-drag scroll interactions directly on the speech
+ * activity canvas.  Handlers live here (not inside the renderer) so we can
+ * call addEventListener with { passive: false } from a known-non-passive
+ * context and reliably call preventDefault() to stop the parent <main>
+ * scroll container from consuming the events.
+ */
+function setupSpeechActivityScroll(canvas: HTMLCanvasElement): void {
+  canvas.style.touchAction = "none";
+  canvas.style.cursor = "grab";
+
+  // ---------------------------------------------------------------------------
+  // Wheel scroll
+  // ---------------------------------------------------------------------------
+  canvas.addEventListener(
+    "wheel",
+    (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Prefer horizontal axis (trackpad swipe); fall back to vertical
+      // inverted (scroll up = go back in time = positive frame offset).
+      const raw =
+        Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : -e.deltaY;
+
+      // Normalise to logical pixels.
+      let pixels: number;
+      switch (e.deltaMode) {
+        case 1: pixels = raw * 20; break;   // DOM_DELTA_LINE
+        case 2: pixels = raw * 500; break;  // DOM_DELTA_PAGE
+        default: pixels = raw; break;       // DOM_DELTA_PIXEL
+      }
+
+      // Scale pixels → frames (one canvas-width of drag = bufferSize frames).
+      const rect = canvas.getBoundingClientRect();
+      const framesPerPixel = speechActivityRenderer.bufferFrames / Math.max(rect.width, 1);
+      speechActivityRenderer.scrollAccum += pixels * framesPerPixel;
+      const whole = Math.trunc(speechActivityRenderer.scrollAccum);
+      if (whole !== 0) {
+        speechActivityRenderer.scrollAccum -= whole;
+        speechActivityRenderer.scrollBy(whole);
+      }
+    },
+    { passive: false }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Pointer drag
+  // ---------------------------------------------------------------------------
+  let isDragging = false;
+  let dragLastX = 0;
+
+  canvas.addEventListener("pointerdown", (e: PointerEvent) => {
+    e.preventDefault();
+    isDragging = true;
+    dragLastX = e.clientX;
+    speechActivityRenderer.scrollAccum = 0;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+  });
+
+  canvas.addEventListener("pointermove", (e: PointerEvent) => {
+    if (!isDragging) return;
+    e.preventDefault();
+    const dx = e.clientX - dragLastX;
+    dragLastX = e.clientX;
+    // Drag left (negative dx) → scroll into history (positive frame delta).
+    // The graph moves with the finger: content under the pointer stays put,
+    // so a leftward drag reveals older data on the right side.
+    const rect = canvas.getBoundingClientRect();
+    const framesPerPixel = speechActivityRenderer.bufferFrames / Math.max(rect.width, 1);
+    speechActivityRenderer.scrollAccum += dx * framesPerPixel;
+    const whole = Math.trunc(speechActivityRenderer.scrollAccum);
+    if (whole !== 0) {
+      speechActivityRenderer.scrollAccum -= whole;
+      speechActivityRenderer.scrollBy(whole);
+    }
+  });
+
+  const endDrag = (e: PointerEvent) => {
+    if (!isDragging) return;
+    e.preventDefault();
+    isDragging = false;
+    canvas.style.cursor = "grab";
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
 }
 
 function setupEventListeners() {
@@ -314,6 +409,18 @@ function setupEventListeners() {
   // Save device selections on change
   deviceSelect.addEventListener("change", () => saveSettings(getCurrentSettings()));
   deviceSelect2.addEventListener("change", () => saveSettings(getCurrentSettings()));
+
+  // Speech activity scroll buttons
+  // Each click scrolls by 1/4 of the visible window (bufferSize/4 frames).
+  btnScrollBack.addEventListener("click", () => {
+    speechActivityRenderer.scrollBy(Math.max(1, Math.round(speechActivityRenderer.bufferFrames / 4)));
+  });
+  btnScrollFwd.addEventListener("click", () => {
+    speechActivityRenderer.scrollBy(-Math.max(1, Math.round(speechActivityRenderer.bufferFrames / 4)));
+  });
+  btnScrollLive.addEventListener("click", () => {
+    speechActivityRenderer.resetToLive();
+  });
 
   // Configuration panel
   setupConfigPanelListeners();

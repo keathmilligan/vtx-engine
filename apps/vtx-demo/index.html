@@ -43,7 +43,14 @@
             </div>
           </div>
           <div class="panel-wrapper speech-activity-wrapper">
-            <div class="panel-label">Speech Activity</div>
+            <div class="panel-label-row">
+              <div class="panel-label">Speech Activity</div>
+              <div class="speech-scroll-controls">
+                <button id="btn-scroll-back" class="scroll-btn" title="Scroll back" aria-label="Scroll back">&#8592;</button>
+                <button id="btn-scroll-fwd" class="scroll-btn" title="Scroll forward" aria-label="Scroll forward">&#8594;</button>
+                <button id="btn-scroll-live" class="scroll-btn scroll-btn-live" title="Jump to live" aria-label="Jump to live">Live</button>
+              </div>
+            </div>
             <div class="panel speech-activity-area">
               <canvas id="speech-canvas"></canvas>
             </div>

@@ -383,12 +383,59 @@ button#btn-download-model:hover:not(:disabled) {
   flex: 0.8;
 }
 
+.panel-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  min-height: 18px;
+}
+
 .panel-label {
   font-size: 0.7rem;
   font-weight: 500;
   color: var(--viz-panel-label);
   padding: 2px 4px;
   flex-shrink: 0;
+}
+
+.speech-scroll-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding-right: 2px;
+}
+
+.scroll-btn {
+  background: var(--surface-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  line-height: 1.6;
+}
+
+.scroll-btn:hover:not(:disabled) {
+  background: var(--border-default);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+
+.scroll-btn-live {
+  background: rgba(34, 197, 94, 0.12);
+  color: rgba(34, 197, 94, 0.85);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.scroll-btn-live:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.22);
+  color: rgba(34, 197, 94, 1);
+  border-color: rgba(34, 197, 94, 0.6);
 }
 
 .panel {
