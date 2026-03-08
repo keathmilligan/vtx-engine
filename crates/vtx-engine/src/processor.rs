@@ -82,6 +82,7 @@ pub trait SpeechEventCallback: Send {
 
 /// Configuration for a speech detection mode (voiced or whisper)
 #[derive(Clone)]
+#[allow(dead_code)]
 struct SpeechModeConfig {
     /// Minimum amplitude threshold in dB
     threshold_db: f32,
@@ -95,19 +96,13 @@ struct SpeechModeConfig {
 
 /// Speech detector that detects when speech starts and ends.
 ///
-/// Uses multi-feature analysis for robust speech detection:
-/// - RMS amplitude for basic energy detection
-/// - Zero-Crossing Rate (ZCR) to distinguish voiced speech from transients
-/// - Spectral centroid approximation to identify speech-band frequency content
-///
-/// Implements dual-mode detection:
-/// - **Voiced mode**: For normal speech (lower ZCR, speech-band centroid)
-/// - **Whisper mode**: For soft/breathy speech (higher ZCR, broader centroid range)
-///
-/// Explicit transient rejection filters keyboard clicks and similar impulsive sounds.
+/// Currently uses simple amplitude-based silence detection.
+/// ZCR, spectral centroid, transient rejection, and word break detection
+/// are computed for visualization metrics but do not affect speech state.
 ///
 /// Includes lookback functionality to capture the true start of speech by maintaining
 /// a ring buffer of recent audio samples and analyzing them retroactively.
+#[allow(dead_code)]
 pub struct SpeechDetector {
     /// Sample rate for time/frequency calculations
     sample_rate: u32,
@@ -207,7 +202,7 @@ impl SpeechDetector {
     ///
     /// Default parameters:
     /// - Voiced mode: -42dB threshold, ZCR 0.01-0.30, centroid 200-5500Hz, 80ms onset
-    /// - Whisper mode: -52dB threshold, ZCR 0.08-0.45, centroid 300-7000Hz, 120ms onset
+    /// - Whisper mode: -52dB threshold, ZCR 0.02-0.45, centroid 300-7000Hz, 120ms onset
     /// - Transient rejection: ZCR > 0.45 AND centroid > 6500Hz
     /// - Hold time: 200ms (reduced from 300ms to detect sentence-end pauses from fast talkers)
     /// - Onset grace period: 30ms (brief dips in features don't reset onset counters)
@@ -215,6 +210,11 @@ impl SpeechDetector {
     /// - Lookback threshold: -55dB (more sensitive to catch speech starts)
     /// - Word break min gap: 40ms (reduced from 80ms to catch fast-talker inter-word gaps)
     /// - Word break threshold ratio: 0.25 (25% of rolling average, tuned for dense speech)
+    ///
+    /// Word break detection is energy-based and runs independently of speech candidate
+    /// classification.  During active speech, if the RMS amplitude drops below the
+    /// word break threshold ratio of the rolling average, a word break is tracked
+    /// regardless of whether the frame's spectral features match a speech mode.
     pub fn with_defaults(sample_rate: u32) -> Self {
         let hold_samples = (sample_rate as u64 * 200 / 1000) as u32;
         // 200ms lookback buffer
@@ -230,7 +230,7 @@ impl SpeechDetector {
             },
             whisper_config: SpeechModeConfig {
                 threshold_db: -52.0,
-                zcr_range: (0.08, 0.45),
+                zcr_range: (0.02, 0.45),
                 centroid_range: (300.0, 7000.0),
                 onset_samples: (sample_rate as u64 * 120 / 1000) as u32,
             },
@@ -344,11 +344,13 @@ impl SpeechDetector {
     }
 
     /// Check if features indicate a transient sound
+    #[allow(dead_code)]
     fn is_transient(&self, zcr: f32, centroid: f32) -> bool {
         zcr > self.transient_zcr_threshold && centroid > self.transient_centroid_threshold
     }
 
     /// Check if features match voiced speech mode
+    #[allow(dead_code)]
     fn matches_voiced_mode(&self, db: f32, zcr: f32, centroid: f32) -> bool {
         db >= self.voiced_config.threshold_db
             && zcr >= self.voiced_config.zcr_range.0
@@ -358,6 +360,7 @@ impl SpeechDetector {
     }
 
     /// Check if features match whisper speech mode
+    #[allow(dead_code)]
     fn matches_whisper_mode(&self, db: f32, zcr: f32, centroid: f32) -> bool {
         db >= self.whisper_config.threshold_db
             && zcr >= self.whisper_config.zcr_range.0
@@ -372,6 +375,7 @@ impl SpeechDetector {
     }
 
     /// Reset all onset tracking state
+    #[allow(dead_code)]
     fn reset_onset_state(&mut self) {
         self.is_pending_voiced = false;
         self.is_pending_whisper = false;
@@ -467,6 +471,7 @@ impl SpeechDetector {
     }
 
     /// Update the running average of speech amplitude
+    #[allow(dead_code)]
     fn update_speech_amplitude_average(&mut self, rms: f32, sample_count: u32) {
         self.recent_speech_amplitude_sum += rms * sample_count as f32;
         self.recent_speech_amplitude_count += sample_count;
@@ -480,6 +485,7 @@ impl SpeechDetector {
     }
 
     /// Get the recent average speech amplitude (linear)
+    #[allow(dead_code)]
     fn get_recent_speech_amplitude(&self) -> f32 {
         if self.recent_speech_amplitude_count == 0 {
             return 0.0;
@@ -488,6 +494,7 @@ impl SpeechDetector {
     }
 
     /// Reset word break detection state
+    #[allow(dead_code)]
     fn reset_word_break_state(&mut self) {
         self.in_word_break = false;
         self.word_break_sample_count = 0;
@@ -498,26 +505,35 @@ impl SpeechDetector {
         self.last_word_break_event = None;
     }
 
-    /// Process audio samples for speech detection
+    /// Process audio samples for speech detection.
+    ///
+    /// Uses simple amplitude-based silence detection:
+    /// - Frame above speech threshold dB → speech candidate
+    /// - Onset requires sustained energy above threshold
+    /// - Speech ends after hold_time of sustained silence
+    ///
+    /// ZCR, spectral centroid, transient rejection, and word break detection
+    /// are disabled (metrics are still computed for visualization but do not
+    /// affect speech state).
     pub fn process(&mut self, samples: &[f32]) {
-        // Reset state change at start of each process call
+        // Reset per-frame outputs
         self.last_state_change = SpeechStateChange::None;
         self.last_word_break_event = None;
 
         // Add samples to lookback buffer
         self.push_to_lookback_buffer(samples);
 
-        // Calculate features
+        // Calculate features (all computed for metrics/visualization)
         let rms = Self::calculate_rms(samples);
         let db = Self::amplitude_to_db(rms);
         let zcr = Self::calculate_zcr(samples);
         let centroid = self.estimate_spectral_centroid(samples, db);
 
-        // Store metrics
+        // Store metrics for visualization
         self.last_amplitude_db = db;
         self.last_zcr = zcr;
         self.last_centroid_hz = centroid;
-        self.last_is_transient = self.is_transient(zcr, centroid);
+        self.last_is_transient = false; // disabled
         self.last_lookback_offset_ms = None;
         self.last_is_word_break = false;
 
@@ -526,18 +542,9 @@ impl SpeechDetector {
             return;
         }
 
-        // Transient rejection
-        if self.last_is_transient {
-            self.reset_onset_state();
-            if !self.is_speaking {
-                return;
-            }
-        }
-
-        // Check feature matching
-        let is_voiced = self.matches_voiced_mode(db, zcr, centroid);
-        let is_whisper = self.matches_whisper_mode(db, zcr, centroid);
-        let is_speech_candidate = is_voiced || is_whisper;
+        // Simple amplitude-based speech detection.
+        // Use the voiced threshold as the speech/silence boundary.
+        let is_speech_candidate = db >= self.voiced_config.threshold_db;
 
         let samples_len = samples.len() as u32;
 
@@ -545,170 +552,52 @@ impl SpeechDetector {
             self.silence_sample_count = 0;
 
             if self.is_speaking {
+                // Already speaking — just accumulate duration
                 self.speech_sample_count += samples.len() as u64;
-                self.update_speech_amplitude_average(rms, samples_len);
-
-                // Check if word break ended
-                if self.in_word_break {
-                    if self.word_break_sample_count >= self.min_word_break_samples
-                        && self.word_break_sample_count <= self.max_word_break_samples
-                    {
-                        let gap_duration_ms =
-                            self.samples_to_ms(self.word_break_sample_count as u64) as u32;
-                        let offset_ms =
-                            self.samples_to_ms(self.word_break_start_speech_samples) as u32;
-
-                        let payload = WordBreakPayload {
-                            offset_ms,
-                            gap_duration_ms,
-                        };
-
-                        if let Some(ref callback) = self.callback {
-                            callback.on_word_break(payload);
-                        }
-
-                        self.last_word_break_event = Some(WordBreakEvent {
-                            offset_ms,
-                            gap_duration_ms,
-                        });
-
-                        tracing::debug!(
-                            "Word break detected (offset: {}ms, gap: {}ms)",
-                            offset_ms,
-                            gap_duration_ms
-                        );
-                    }
-                    self.in_word_break = false;
-                    self.word_break_sample_count = 0;
-                }
             } else {
-                // Handle onset accumulation
-                if is_voiced {
-                    self.voiced_grace_count = 0;
-                    if !self.is_pending_voiced {
-                        self.is_pending_voiced = true;
-                        self.voiced_onset_count = samples_len;
-                    } else {
-                        self.voiced_onset_count += samples_len;
+                // Onset accumulation (reuse voiced onset counter)
+                self.voiced_onset_count += samples_len;
+
+                if self.voiced_onset_count >= self.voiced_config.onset_samples {
+                    // Speech confirmed
+                    self.is_speaking = true;
+                    self.speech_sample_count = self.voiced_onset_count as u64;
+                    self.voiced_onset_count = 0;
+
+                    let (lookback_samples, lookback_offset_ms) = self.find_lookback_start();
+                    self.last_lookback_offset_ms = Some(lookback_offset_ms);
+
+                    self.last_state_change = SpeechStateChange::Started {
+                        lookback_samples: lookback_samples.len(),
+                    };
+
+                    let payload = SpeechEventPayload {
+                        duration_ms: None,
+                        lookback_offset_ms: Some(lookback_offset_ms),
+                    };
+
+                    if let Some(ref callback) = self.callback {
+                        callback.on_speech_started(payload);
                     }
 
-                    if self.voiced_onset_count >= self.voiced_config.onset_samples {
-                        self.is_speaking = true;
-                        self.speech_sample_count = self.voiced_onset_count as u64;
-                        self.reset_onset_state();
-
-                        let (lookback_samples, lookback_offset_ms) = self.find_lookback_start();
-                        self.last_lookback_offset_ms = Some(lookback_offset_ms);
-
-                        self.last_state_change = SpeechStateChange::Started {
-                            lookback_samples: lookback_samples.len(),
-                        };
-
-                        let payload = SpeechEventPayload {
-                            duration_ms: None,
-                            lookback_offset_ms: Some(lookback_offset_ms),
-                        };
-
-                        if let Some(ref callback) = self.callback {
-                            callback.on_speech_started(payload);
-                        }
-
-                        tracing::debug!(
-                            "Speech started (voiced mode, lookback: {}ms)",
-                            lookback_offset_ms
-                        );
-                        return;
-                    }
-                }
-
-                if is_whisper {
-                    self.whisper_grace_count = 0;
-                    if !self.is_pending_whisper {
-                        self.is_pending_whisper = true;
-                        self.whisper_onset_count = samples_len;
-                    } else {
-                        self.whisper_onset_count += samples_len;
-                    }
-
-                    if !self.is_speaking
-                        && self.whisper_onset_count >= self.whisper_config.onset_samples
-                    {
-                        self.is_speaking = true;
-                        self.speech_sample_count = self.whisper_onset_count as u64;
-                        self.reset_onset_state();
-
-                        let (lookback_samples, lookback_offset_ms) = self.find_lookback_start();
-                        self.last_lookback_offset_ms = Some(lookback_offset_ms);
-
-                        self.last_state_change = SpeechStateChange::Started {
-                            lookback_samples: lookback_samples.len(),
-                        };
-
-                        let payload = SpeechEventPayload {
-                            duration_ms: None,
-                            lookback_offset_ms: Some(lookback_offset_ms),
-                        };
-
-                        if let Some(ref callback) = self.callback {
-                            callback.on_speech_started(payload);
-                        }
-
-                        tracing::debug!(
-                            "Speech started (whisper mode, lookback: {}ms)",
-                            lookback_offset_ms
-                        );
-                    }
+                    tracing::debug!(
+                        "Speech started (amplitude mode, lookback: {}ms)",
+                        lookback_offset_ms
+                    );
                 }
             }
         } else {
-            // Grace period handling
-            if self.is_pending_voiced {
-                self.voiced_grace_count += samples_len;
-                if self.voiced_grace_count >= self.onset_grace_samples {
-                    self.is_pending_voiced = false;
-                    self.voiced_onset_count = 0;
-                    self.voiced_grace_count = 0;
-                }
-            }
-
-            if self.is_pending_whisper {
-                self.whisper_grace_count += samples_len;
-                if self.whisper_grace_count >= self.onset_grace_samples {
-                    self.is_pending_whisper = false;
-                    self.whisper_onset_count = 0;
-                    self.whisper_grace_count = 0;
-                }
-            }
+            // Below threshold — reset onset counter, accumulate silence
+            self.voiced_onset_count = 0;
 
             if self.is_speaking {
                 self.silence_sample_count += samples_len;
+                self.speech_sample_count += samples.len() as u64;
 
-                // Word break detection
-                let recent_avg = self.get_recent_speech_amplitude();
-                let threshold = recent_avg * self.word_break_threshold_ratio;
-
-                if recent_avg > 0.0 && rms < threshold {
-                    if !self.in_word_break {
-                        self.in_word_break = true;
-                        self.word_break_sample_count = samples_len;
-                        self.word_break_start_speech_samples = self.speech_sample_count;
-                    } else {
-                        self.word_break_sample_count += samples_len;
-                    }
-
-                    if self.word_break_sample_count >= self.min_word_break_samples
-                        && self.word_break_sample_count <= self.max_word_break_samples
-                    {
-                        self.last_is_word_break = true;
-                    }
-                }
-
-                // Check hold time
                 if self.silence_sample_count >= self.hold_samples {
                     let duration_ms = self.samples_to_ms(self.speech_sample_count);
                     self.is_speaking = false;
                     self.speech_sample_count = 0;
-                    self.reset_word_break_state();
 
                     self.last_state_change = SpeechStateChange::Ended { duration_ms };
 
@@ -1101,5 +990,259 @@ impl VisualizationProcessor {
         };
 
         Some(viz)
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_RATE: u32 = 48000;
+    /// 10ms chunk at 48kHz = 480 samples (mono)
+    const CHUNK_SIZE: usize = 480;
+
+    /// Generate a sine wave chunk at the given frequency and amplitude.
+    /// Returns mono f32 samples.
+    fn sine_chunk(freq_hz: f32, amplitude: f32, sample_rate: u32, num_samples: usize) -> Vec<f32> {
+        (0..num_samples)
+            .map(|i| {
+                amplitude
+                    * (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sample_rate as f32).sin()
+            })
+            .collect()
+    }
+
+    /// Generate a silence chunk.
+    fn silence_chunk(num_samples: usize) -> Vec<f32> {
+        vec![0.0; num_samples]
+    }
+
+    /// Feed N milliseconds of a given chunk pattern into the detector.
+    fn feed_ms(detector: &mut SpeechDetector, chunk: &[f32], duration_ms: u32) {
+        let chunks_needed =
+            (SAMPLE_RATE as u64 * duration_ms as u64 / 1000 / CHUNK_SIZE as u64) as u32;
+        for _ in 0..chunks_needed {
+            detector.process(chunk);
+        }
+    }
+
+    // --- Speech detection tests ---
+
+    #[test]
+    fn voiced_speech_detected_after_onset() {
+        let mut det = SpeechDetector::new(SAMPLE_RATE);
+        // 300Hz sine at -30dB (amplitude ~0.032) - clear voiced speech
+        let chunk = sine_chunk(300.0, 0.032, SAMPLE_RATE, CHUNK_SIZE);
+
+        // Feed 100ms (more than 80ms onset)
+        for _ in 0..10 {
+            det.process(&chunk);
+        }
+
+        assert!(
+            det.is_speaking,
+            "Speech should be detected after 100ms of voiced audio"
+        );
+    }
+
+    // --- Feature computation tests ---
+
+    #[test]
+    fn rms_of_silence_is_zero() {
+        let silence = silence_chunk(CHUNK_SIZE);
+        let rms = SpeechDetector::calculate_rms(&silence);
+        assert_eq!(rms, 0.0);
+    }
+
+    #[test]
+    fn zcr_of_silence_is_zero() {
+        let silence = silence_chunk(CHUNK_SIZE);
+        let zcr = SpeechDetector::calculate_zcr(&silence);
+        assert_eq!(zcr, 0.0);
+    }
+
+    #[test]
+    fn rms_of_sine_matches_theory() {
+        // RMS of a sine wave with amplitude A is A/sqrt(2)
+        let amplitude = 0.5;
+        let chunk = sine_chunk(440.0, amplitude, SAMPLE_RATE, CHUNK_SIZE * 10); // longer for accuracy
+        let rms = SpeechDetector::calculate_rms(&chunk);
+        let expected = amplitude / 2.0f32.sqrt();
+        assert!(
+            (rms - expected).abs() < 0.01,
+            "RMS of sine should be ~{}, got {}",
+            expected,
+            rms
+        );
+    }
+
+    #[test]
+    fn silence_ends_speech_after_hold_time() {
+        let mut det = SpeechDetector::new(SAMPLE_RATE);
+        // -30dB amplitude (above -42 threshold)
+        let speech = sine_chunk(300.0, 0.032, SAMPLE_RATE, CHUNK_SIZE);
+        let silence = silence_chunk(CHUNK_SIZE);
+
+        // Establish speech
+        feed_ms(&mut det, &speech, 200);
+        assert!(det.is_speaking, "Speech should be active after onset");
+
+        // Feed silence past hold time (200ms)
+        feed_ms(&mut det, &silence, 210);
+        assert!(!det.is_speaking, "Speech should end after hold time");
+    }
+
+    #[test]
+    fn brief_silence_does_not_end_speech() {
+        let mut det = SpeechDetector::new(SAMPLE_RATE);
+        let speech = sine_chunk(300.0, 0.032, SAMPLE_RATE, CHUNK_SIZE);
+        let silence = silence_chunk(CHUNK_SIZE);
+
+        // Establish speech
+        feed_ms(&mut det, &speech, 200);
+        assert!(det.is_speaking);
+
+        // Brief silence (100ms, below 200ms hold time)
+        feed_ms(&mut det, &silence, 100);
+        assert!(det.is_speaking, "Brief silence should not end speech");
+
+        // Resume speech
+        feed_ms(&mut det, &speech, 50);
+        assert!(
+            det.is_speaking,
+            "Speech should still be active after brief gap"
+        );
+    }
+
+    #[test]
+    fn below_threshold_audio_does_not_trigger_speech() {
+        let mut det = SpeechDetector::new(SAMPLE_RATE);
+        // -50dB amplitude (below -42 threshold)
+        let quiet = sine_chunk(300.0, 0.003, SAMPLE_RATE, CHUNK_SIZE);
+
+        feed_ms(&mut det, &quiet, 500);
+        assert!(
+            !det.is_speaking,
+            "Audio below threshold should not trigger speech"
+        );
+    }
+
+    /// Diagnostic test: process the reference WAV file through the speech detector
+    /// and write per-frame metrics to CSV for offline analysis.
+    ///
+    /// Run with: cargo test -- --nocapture dump_wav_metrics
+    #[test]
+    fn dump_wav_metrics() {
+        use std::io::Write;
+
+        // Try project root first, then the recordings dir
+        let wav_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("exampe.wav");
+        if !wav_path.exists() {
+            eprintln!("Skipping dump_wav_metrics: {:?} not found", wav_path);
+            return;
+        }
+
+        let reader = hound::WavReader::open(&wav_path)
+            .unwrap_or_else(|e| panic!("Failed to open {:?}: {}", wav_path, e));
+        let spec = reader.spec();
+        let wav_sr = spec.sample_rate;
+        let wav_ch = spec.channels as usize;
+
+        eprintln!(
+            "WAV: {}Hz, {} ch, {} bit, {:?}",
+            wav_sr, wav_ch, spec.bits_per_sample, spec.sample_format
+        );
+
+        // Decode to f32
+        let raw_samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => reader
+                .into_samples::<f32>()
+                .filter_map(|s| s.ok())
+                .collect(),
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                let max_val = (1u32 << (bits - 1)) as f32;
+                reader
+                    .into_samples::<i32>()
+                    .filter_map(|s| s.ok())
+                    .map(|s| s as f32 / max_val)
+                    .collect()
+            }
+        };
+
+        // Convert to mono (same as audio loop)
+        let mono: Vec<f32> = if wav_ch > 1 {
+            crate::audio::convert_to_mono(&raw_samples, wav_ch)
+        } else {
+            raw_samples
+        };
+
+        eprintln!(
+            "Mono samples: {} ({:.2}s)",
+            mono.len(),
+            mono.len() as f64 / wav_sr as f64
+        );
+
+        // Process in 10ms chunks (same as play_file / audio loop)
+        let chunk_size = (wav_sr as usize) / 100; // 480 for 48kHz
+        let mut det = SpeechDetector::new(wav_sr);
+
+        let csv_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("speech_metrics.csv");
+        let mut csv = std::fs::File::create(&csv_path)
+            .unwrap_or_else(|e| panic!("Cannot create {:?}: {}", csv_path, e));
+
+        writeln!(
+            csv,
+            "frame,time_ms,amplitude_db,zcr,centroid_hz,is_speaking,is_voiced_pending,is_whisper_pending,is_transient,is_word_break,rms_linear"
+        )
+        .unwrap();
+
+        let mut frame_idx = 0u32;
+        for chunk in mono.chunks(chunk_size) {
+            let time_ms = frame_idx as f64 * 10.0;
+
+            // Compute raw features for CSV (same math as process())
+            let rms = SpeechDetector::calculate_rms(chunk);
+            let db = SpeechDetector::amplitude_to_db(rms);
+            let _zcr = SpeechDetector::calculate_zcr(chunk);
+            let _centroid = det.estimate_spectral_centroid(chunk, db);
+
+            // Run the detector
+            det.process(chunk);
+            let m = det.get_metrics();
+
+            writeln!(
+                csv,
+                "{},{:.1},{:.2},{:.4},{:.1},{},{},{},{},{},{:.6}",
+                frame_idx,
+                time_ms,
+                m.amplitude_db,
+                m.zcr,
+                m.centroid_hz,
+                m.is_speaking as u8,
+                m.is_voiced_pending as u8,
+                m.is_whisper_pending as u8,
+                m.is_transient as u8,
+                m.is_word_break as u8,
+                rms,
+            )
+            .unwrap();
+
+            frame_idx += 1;
+        }
+
+        eprintln!("Wrote {} frames to {:?}", frame_idx, csv_path);
+
+        // Basic sanity: we should have processed the whole file
+        let expected_frames = (mono.len() + chunk_size - 1) / chunk_size;
+        assert_eq!(frame_idx as usize, expected_frames);
     }
 }
