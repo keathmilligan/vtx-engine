@@ -8,6 +8,8 @@ Provides platform-native audio capture, real-time speech detection, audio visual
 
 ## Features
 
+### Rust engine (`vtx-engine`)
+
 - **Audio capture** — WASAPI (Windows), CoreAudio + ScreenCaptureKit (macOS), PipeWire (Linux)
 - **Echo cancellation** — AEC3-based echo cancellation on all platforms; activates automatically when a second audio source (system audio) is added
 - **Speech detection** — Dual-mode VAD (voiced + whisper/soft speech) with signal-feature analysis (RMS, ZCR, spectral centroid), transient rejection, 200ms lookback, and word-break detection
@@ -22,7 +24,16 @@ Provides platform-native audio capture, real-time speech detection, audio visual
 - **Config persistence** — `EngineConfig::load()` / `EngineConfig::save()` as TOML in the platform-standard config directory
 - **Transcription history** — `TranscriptionHistory`: bounded NDJSON-backed history store with WAV TTL cleanup
 
+### TypeScript visualization (`@vtx-engine/viz`)
+
+- **Waveform renderer** — real-time scrolling waveform
+- **Spectrogram renderer** — 512-point FFT with log-frequency mapping and color gradient LUT
+- **Mini-waveform renderer** — compact waveform thumbnail
+- **Speech activity renderer** — scrollable history canvas showing amplitude, ZCR, spectral centroid, VAD state (confirmed speech, lookback, word-break, onset markers), and segment submission markers; supports mouse-wheel and drag-to-scroll with a live/history indicator overlay; accumulates up to ~30 minutes of history (configurable)
+
 ## Adding to Your Project
+
+### Rust engine
 
 ```sh
 cargo add vtx-engine
@@ -34,6 +45,21 @@ Or add to your `Cargo.toml` manually:
 [dependencies]
 vtx-engine = "0.1"
 tokio = { version = "1", features = ["full"] }
+```
+
+### TypeScript visualization library
+
+```sh
+npm install @vtx-engine/viz
+# or
+pnpm add @vtx-engine/viz
+```
+
+Then import the renderers and (optionally) the bundled stylesheet:
+
+```ts
+import { SpeechActivityRenderer, WaveformRenderer, SpectrogramRenderer } from "@vtx-engine/viz";
+import "@vtx-engine/viz/styles";
 ```
 
 ## Quick Start
@@ -105,7 +131,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See [USAGE.md](USAGE.md) for full examples covering manual recording, file playback, model management, config persistence, and subsystem configuration.
+See [USAGE.md](USAGE.md) for full examples covering manual recording, file playback, model management, config persistence, subsystem configuration, and the speech activity visualization renderer.
+
+### Speech activity visualization (quick start)
+
+```ts
+import { SpeechActivityRenderer } from "@vtx-engine/viz";
+import type { SpeechMetrics } from "@vtx-engine/viz";
+
+const canvas = document.getElementById("speech-canvas") as HTMLCanvasElement;
+
+// bufferSize = visible window (frames); maxHistoryFrames = scroll depth (~30 min at 16ms/frame)
+const renderer = new SpeechActivityRenderer(canvas, 256, 108_000);
+renderer.drawIdle();
+
+// Wire up scroll controls
+btnScrollBack.addEventListener("click", () =>
+  renderer.scrollBy(Math.round(renderer.bufferFrames / 4))
+);
+btnScrollFwd.addEventListener("click", () =>
+  renderer.scrollBy(-Math.round(renderer.bufferFrames / 4))
+);
+btnScrollLive.addEventListener("click", () => renderer.resetToLive());
+
+// Feed visualization data from the engine event channel
+engine.on("visualization-data", (payload) => {
+  if (payload.frame_interval_ms) renderer.configure(payload.frame_interval_ms);
+  if (payload.speech_metrics)    renderer.pushMetrics(payload.speech_metrics);
+});
+
+// Lifecycle
+renderer.start();    // begin rAF draw loop
+// ...
+renderer.stop();     // stop loop; one final draw
+renderer.clear();    // reset all history and scroll state
+```
 
 ## Whisper Models
 

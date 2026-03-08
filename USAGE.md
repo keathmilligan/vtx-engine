@@ -2,6 +2,8 @@
 
 This guide covers the primary integration patterns for vtx-engine:
 
+**Rust engine (`vtx-engine`)**
+
 1. **Real-Time Dictation** — short-burst VAD-driven microphone dictation.
 2. **Stream Transcription** — post-capture or encoder-tee transcription with timestamped segments.
 3. **File Transcription** — transcribe a WAV file and get timestamped segments.
@@ -12,6 +14,10 @@ This guide covers the primary integration patterns for vtx-engine:
 8. **Transcription History** — recording and managing a persistent history of transcription results.
 9. **Subsystem Configuration** — disabling unused subsystems at build time.
 10. **Device Testing** — testing audio input levels before starting a capture session.
+
+**TypeScript visualization (`@vtx-engine/viz`)**
+
+11. **Speech Activity Renderer** — scrollable canvas widget showing VAD state, signal metrics, and segment markers with full history scrollback.
 
 ---
 
@@ -725,3 +731,254 @@ my-app/                         vtx-engine/
    up the local changes automatically.
 3. When you are done, remove the `[patch.crates-io]` section and bump the
    version in `[dependencies]` to the newly published release.
+
+---
+
+## Speech Activity Renderer (`@vtx-engine/viz`)
+
+`SpeechActivityRenderer` is a self-contained canvas widget that visualizes VAD
+state, signal metrics, and segment markers in real time. It maintains a scrollable
+history buffer so the user can pan back through the entire recording session.
+
+### Installation
+
+```sh
+npm install @vtx-engine/viz
+# or
+pnpm add @vtx-engine/viz
+```
+
+### Importing
+
+```ts
+import { SpeechActivityRenderer } from "@vtx-engine/viz";
+import type { SpeechMetrics } from "@vtx-engine/viz";
+
+// Optional: import bundled CSS custom-property defaults
+import "@vtx-engine/viz/styles";
+```
+
+### Construction
+
+```ts
+const canvas = document.getElementById("speech-canvas") as HTMLCanvasElement;
+
+const renderer = new SpeechActivityRenderer(
+  canvas,          // HTMLCanvasElement — required
+  256,             // bufferSize: visible window width in frames (default 256, ~4s at 16ms/frame)
+  108_000          // maxHistoryFrames: scrollback cap (default 108 000, ~30 min at 16ms/frame)
+);
+```
+
+`maxHistoryFrames` is clamped to at least `bufferSize * 2`. When the cap is
+reached the oldest `bufferSize` frames are dropped in a single batch, amortizing
+the copy cost.
+
+### Lifecycle
+
+```ts
+renderer.drawIdle();   // draw empty background immediately (before first data arrives)
+
+renderer.start();      // begin requestAnimationFrame draw loop
+// ... receive and push frames ...
+renderer.stop();       // cancel rAF loop; triggers one final draw
+
+renderer.clear();      // zero all history and scroll state; redraws idle background
+renderer.resize();     // re-size canvas to match its CSS rect; call on window resize
+```
+
+`renderer.active` is `true` while the rAF loop is running.
+
+### Feeding data
+
+```ts
+// Called once per visualization frame from the engine event channel.
+// metrics must be 16 kHz, normalized per the SpeechMetrics contract.
+renderer.pushMetrics(metrics);         // SpeechMetrics
+
+// Call whenever a VAD segment is submitted for transcription.
+renderer.markSegmentSubmitted();
+```
+
+Internally, `pushMetrics` writes into a 20-frame delay buffer before appending
+to the history arrays. This lookback ensures that the speech bar accurately
+reflects the VAD's 200 ms pre-speech buffer.
+
+#### `SpeechMetrics` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `amplitude_db` | `number` | RMS amplitude in dB |
+| `zcr` | `number` | Zero-crossing rate (0.0–0.5) |
+| `centroid_hz` | `number` | Spectral centroid in Hz |
+| `is_speaking` | `boolean` | VAD confirmed speech |
+| `voiced_onset_pending` | `boolean` | Voiced onset detection in progress |
+| `whisper_onset_pending` | `boolean` | Whisper onset detection in progress |
+| `is_transient` | `boolean` | Frame flagged as transient (rejected by VAD) |
+| `is_lookback_speech` | `boolean` | Frame is in the lookback pre-speech buffer |
+| `is_word_break` | `boolean` | Frame is an inter-word pause during speech |
+
+### Configuration
+
+```ts
+// Call whenever the visualization frame interval changes (e.g. from VisualizationData payload).
+renderer.configure(frameIntervalMs);
+```
+
+`frameIntervalMs` defaults to `16`. It controls the x-axis time labels (computed
+dynamically as `t = -(col + scrollOffset) * frameIntervalMs / 1000`).
+
+### Scroll API
+
+```ts
+renderer.scrollBy(deltaFrames);  // positive = into history; negative = toward live
+renderer.resetToLive();          // snap back to the live (rightmost) edge
+renderer.isLive;                 // true when scrollOffset === 0
+renderer.bufferFrames;           // read-only: visible window width (= bufferSize)
+```
+
+`scrollBy` clamps to `[0, totalFrames − bufferSize]`, so scrolling past the
+oldest available frame is not possible. While `isLive` is `true` the canvas
+automatically advances with each new frame; once scrolled back the view is
+anchored in history.
+
+### Wiring scroll controls
+
+The renderer exposes a `scrollAccum` field to accumulate sub-frame fractional
+pixel deltas from wheel and pointer-drag handlers. Pattern used in `vtx-demo`:
+
+```ts
+function setupScrollHandlers(canvas: HTMLCanvasElement) {
+  const framesPerPixel = () => renderer.bufferFrames / canvas.clientWidth;
+
+  // Mouse wheel
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const pixels = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    renderer.scrollAccum += pixels * framesPerPixel();
+    const whole = Math.trunc(renderer.scrollAccum);
+    if (whole !== 0) {
+      renderer.scrollAccum -= whole;
+      renderer.scrollBy(whole);
+    }
+  }, { passive: false });
+
+  // Pointer drag
+  let dragStartX = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    dragStartX = e.clientX;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!(e.buttons & 1)) return;
+    const delta = dragStartX - e.clientX;  // drag left = positive = into history
+    dragStartX = e.clientX;
+    renderer.scrollAccum += delta * framesPerPixel();
+    const whole = Math.trunc(renderer.scrollAccum);
+    if (whole !== 0) {
+      renderer.scrollAccum -= whole;
+      renderer.scrollBy(whole);
+    }
+  });
+  canvas.addEventListener("pointerup", () => {
+    if (renderer.isLive) renderer.resetToLive();
+  });
+}
+```
+
+Button controls are simpler:
+
+```ts
+btnScrollBack.addEventListener("click", () =>
+  renderer.scrollBy(Math.round(renderer.bufferFrames / 4))
+);
+btnScrollFwd.addEventListener("click", () =>
+  renderer.scrollBy(-Math.round(renderer.bufferFrames / 4))
+);
+btnScrollLive.addEventListener("click", () => renderer.resetToLive());
+```
+
+### Visual layers
+
+The canvas is partitioned top-to-bottom:
+
+| Layer | Height | What is drawn |
+|---|---|---|
+| Speech bar | top 8% | Confirmed speech (green) and lookback regions (blue) |
+| Word-break bar | next 8% | Inter-word gaps during speech (orange) |
+| Metrics area | remaining 84% | Amplitude line (amber), ZCR line (cyan), spectral centroid line (fuchsia); voiced, whisper, and transient onset markers as dots; voiced/whisper threshold dashed lines |
+| Segment markers | full height | Dashed white vertical line + downward triangle at each `markSegmentSubmitted()` call |
+| Scroll indicator | top-right overlay | `● LIVE` (green) when live; `◀ -Xs` when scrolled into history |
+
+### Scroll indicator
+
+The overlay is drawn automatically by `draw()` and requires no DOM elements:
+
+- At the live edge: `● LIVE` — green text
+- When scrolled back: `◀ -Xs` where X is the scroll depth in seconds
+
+### CSS theming
+
+All colors are read from CSS custom properties at draw time so they adapt to
+your application's theme:
+
+| Variable | Default | Element |
+|---|---|---|
+| `--vtx-waveform-bg` | `#1e293b` | Canvas background |
+| `--vtx-waveform-grid` | `rgba(255,255,255,0.08)` | Grid lines |
+| `--vtx-waveform-text` | `rgba(255,255,255,0.5)` | Axis labels and scroll indicator |
+| `--vtx-threshold-line` | `rgba(255,255,255,0.15)` | Voiced/whisper threshold lines |
+| `--vtx-speech-confirmed` | `rgba(34,197,94,0.5)` | Confirmed speech bar |
+| `--vtx-speech-lookback` | `rgba(59,130,246,0.7)` | Lookback speech bar |
+| `--vtx-speech-word-break` | `rgba(249,115,22,0.85)` | Word-break bar |
+| `--vtx-metric-amplitude` | `rgba(245,158,11,0.75)` | Amplitude line |
+| `--vtx-metric-zcr` | `rgba(6,182,212,0.75)` | ZCR line |
+| `--vtx-metric-centroid` | `rgba(217,70,239,0.75)` | Spectral centroid line |
+| `--vtx-marker-voiced` | `rgba(34,197,94,0.7)` | Voiced onset dots |
+| `--vtx-marker-whisper` | `rgba(59,130,246,0.7)` | Whisper onset dots |
+| `--vtx-marker-transient` | `rgba(239,68,68,0.7)` | Transient dots |
+| `--vtx-segment-marker` | `rgba(255,255,255,0.85)` | Segment submission markers |
+
+Override any variable on the canvas element or a parent:
+
+```css
+#speech-canvas {
+  --vtx-speech-confirmed: rgba(16, 185, 129, 0.6);
+  --vtx-waveform-bg: #0f172a;
+}
+```
+
+### `SpeechActivityRenderer` API reference
+
+#### Constructor
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `canvas` | `HTMLCanvasElement` | — | Target canvas element |
+| `bufferSize` | `number` | `256` | Visible window width in frames |
+| `maxHistoryFrames` | `number` | `108_000` | Maximum scrollback depth in frames |
+
+#### Properties
+
+| Name | Type | Description |
+|---|---|---|
+| `frameIntervalMs` | `number` | Expected ms between frames; controls x-axis labels |
+| `scrollAccum` | `number` | Fractional frame accumulator for sub-pixel scroll handlers |
+| `active` | `boolean` (read-only) | `true` while the rAF loop is running |
+| `isLive` | `boolean` (read-only) | `true` when scroll offset is 0 (live edge) |
+| `bufferFrames` | `number` (read-only) | Visible window width (`bufferSize`) |
+
+#### Methods
+
+| Method | Description |
+|---|---|
+| `start()` | Start the rAF draw loop. No-op if already active |
+| `stop()` | Stop the rAF loop and trigger one final draw |
+| `clear()` | Zero all history, reset scroll state, redraw idle background |
+| `resize()` | Resize canvas to its CSS layout rect and redraw idle background |
+| `drawIdle()` | Draw the empty background state immediately |
+| `configure(frameIntervalMs)` | Update the frame interval used for x-axis labels |
+| `pushMetrics(metrics)` | Feed one frame of `SpeechMetrics` into the history buffer |
+| `markSegmentSubmitted()` | Record a segment-submission marker at the current frame position |
+| `scrollBy(deltaFrames)` | Scroll by `deltaFrames` (clamped to valid range) |
+| `resetToLive()` | Snap scroll offset back to the live edge |
