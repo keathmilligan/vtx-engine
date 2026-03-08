@@ -1,4 +1,4 @@
-.PHONY: all build build-lib build-viz build-demo test dev-demo clean help publish publish-dry-run
+.PHONY: all build build-lib build-viz build-demo test dev-demo clean help publish publish-dry-run release
 
 # Default target
 all: build
@@ -49,6 +49,15 @@ dev-tauri:
 ## Watch and rebuild the viz package on changes
 dev-viz:
 	pnpm --filter @vtx-engine/viz dev
+
+##
+## Release targets
+##
+
+## Create a new release: bump version, commit, tag, and push (e.g. make release VERSION=0.1.2)
+release:
+	@test -n "$(VERSION)" || (echo "error: VERSION is required  (e.g. make release VERSION=0.1.2)" && exit 1)
+	@bash scripts/release.sh $(VERSION)
 
 ##
 ## Publish targets
