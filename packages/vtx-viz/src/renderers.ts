@@ -29,6 +29,9 @@ export class WaveformRenderer {
   private ringBuffer: RingBuffer;
   private isActive = false;
 
+  /** Total duration represented by the visible buffer, in milliseconds. */
+  windowMs = 80;
+
   constructor(canvas: HTMLCanvasElement, bufferSize = 512) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d");
@@ -154,6 +157,7 @@ export class WaveformRenderer {
     this.ctx.strokeStyle = gridColor;
     this.ctx.lineWidth = 1;
 
+    // Horizontal lines (amplitude rows).
     for (let i = 0; i <= 8; i++) {
       const y = topMargin + (graphHeight / 8) * i;
       this.ctx.beginPath();
@@ -162,8 +166,11 @@ export class WaveformRenderer {
       this.ctx.stroke();
     }
 
-    for (let i = 0; i <= 16; i++) {
-      const x = leftMargin + (graphWidth / 16) * i;
+    // Vertical grid lines — one every 5 ms, aligned to the time axis.
+    const gridStepMs = 5;
+    const numGridIntervals = Math.round(this.windowMs / gridStepMs);
+    for (let i = 0; i <= numGridIntervals; i++) {
+      const x = leftMargin + (graphWidth / numGridIntervals) * i;
       this.ctx.beginPath();
       this.ctx.moveTo(x, topMargin);
       this.ctx.lineTo(x, topMargin + graphHeight);
@@ -185,12 +192,16 @@ export class WaveformRenderer {
       );
     }
 
+    // X-axis labels — one every 20 ms, aligned to the vertical grid lines.
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "top";
-    const timeLabels = ["-80ms", "-60ms", "-40ms", "-20ms", "0"];
-    for (let i = 0; i < timeLabels.length; i++) {
-      const x = leftMargin + (graphWidth / (timeLabels.length - 1)) * i;
-      this.ctx.fillText(timeLabels[i], x, topMargin + graphHeight + 4);
+    const labelStepMs = 20;
+    const numLabelSteps = Math.round(this.windowMs / labelStepMs);
+    for (let i = 0; i <= numLabelSteps; i++) {
+      const tMs = -(this.windowMs - (this.windowMs / numLabelSteps) * i);
+      const label = tMs === 0 ? "0" : `${tMs}ms`;
+      const x = leftMargin + (graphWidth / numLabelSteps) * i;
+      this.ctx.fillText(label, x, topMargin + graphHeight + 4);
     }
   }
 
@@ -242,6 +253,30 @@ export class SpectrogramRenderer {
   private readonly rightMargin = 8;
   private readonly topMargin = 8;
   private readonly bottomMargin = 20;
+
+  /** Sample rate of the audio source in Hz. Set via configure(). */
+  private sampleRate = 48000;
+  /** DEBUG counter — remove before shipping. */
+  private _dbgFrame = 0;
+  /** Number of audio samples per spectrogram column (FFT hop size). */
+  private readonly fftSamplesPerColumn = 512;
+
+  /**
+   * Total duration represented by the visible spectrogram window, in seconds.
+   * Derived from the canvas's current physical pixel width, FFT hop size, and
+   * sample rate, using canvas.width / dpr (not getBoundingClientRect) so it
+   * stays consistent with the width values used during drawing.
+   */
+  get windowS(): number {
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = this.canvas.width / dpr;
+    const graphWidthPx = cssWidth - this.leftMargin - this.rightMargin;
+    if (graphWidthPx <= 0) return 10; // fallback before layout
+    // The offscreen imageData has Math.floor(graphWidthPx) * dpr physical columns.
+    // drawImage stretches those columns across graphWidthPx CSS px, so each
+    // CSS pixel corresponds to dpr FFT frames.
+    return (graphWidthPx * dpr * this.fftSamplesPerColumn) / this.sampleRate;
+  }
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -300,6 +335,17 @@ export class SpectrogramRenderer {
       g: parseInt(h.substring(2, 4), 16) || 0,
       b: parseInt(h.substring(4, 6), 16) || 0,
     };
+  }
+
+  /**
+   * Configure the sample rate so that time labels on the spectrogram accurately
+   * reflect real elapsed time.  Call this whenever the audio source changes
+   * (e.g. when a new file is opened or a capture device is started).
+   *
+   * @param sampleRate - Audio sample rate in Hz (e.g. 48000).
+   */
+  configure(sampleRate: number): void {
+    this.sampleRate = sampleRate;
   }
 
   pushColumn(colors: number[]): void {
@@ -440,6 +486,22 @@ export class SpectrogramRenderer {
     }
   }
 
+  /**
+   * Pick a "nice" time step (in seconds) for grid lines or labels such that
+   * the number of divisions across `widthPx` pixels is no more than
+   * `widthPx / minPxPerDivision`.
+   *
+   * Candidate steps (seconds): 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60 …
+   */
+  private pickTimeStep(windowS: number, widthPx: number, minPxPerDivision: number): number {
+    const maxDivisions = Math.max(1, widthPx / minPxPerDivision);
+    const candidates = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60, 120];
+    for (const step of candidates) {
+      if (windowS / step <= maxDivisions) return step;
+    }
+    return candidates[candidates.length - 1];
+  }
+
   private drawGrid(width: number, height: number): void {
     const gridColor = cssVar(
       "--vtx-spectrogram-grid",
@@ -464,8 +526,18 @@ export class SpectrogramRenderer {
       this.ctx.stroke();
     }
 
-    for (let i = 0; i <= 16; i++) {
-      const x = this.leftMargin + (graphWidth / 16) * i;
+    // Compute windowS directly from graphWidth so grid lines and labels always
+    // use the exact same value and remain aligned regardless of canvas size.
+    const dpr = window.devicePixelRatio || 1;
+    const windowS = (graphWidth * dpr * this.fftSamplesPerColumn) / this.sampleRate;
+
+    // Vertical grid lines — pick a step that gives a reasonable density.
+    // Grid and label steps are chosen from the same candidate list, using the
+    // same graphWidth, so every label lands exactly on a grid line.
+    const timeStep = this.pickTimeStep(windowS, graphWidth, 70);
+    const numSteps = Math.round(windowS / timeStep);
+    for (let i = 0; i <= numSteps; i++) {
+      const x = this.leftMargin + (graphWidth / numSteps) * i;
       this.ctx.beginPath();
       this.ctx.moveTo(x, this.topMargin);
       this.ctx.lineTo(x, this.topMargin + graphHeight);
@@ -485,13 +557,22 @@ export class SpectrogramRenderer {
       this.ctx.fillText(labelNames[i], this.leftMargin - 4, y);
     }
 
+    // X-axis labels — one per grid line, so they are always aligned.
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "top";
-    const timeLabels = ["-2.5s", "-2s", "-1.5s", "-1s", "-0.5s", "0"];
-    for (let i = 0; i < timeLabels.length; i++) {
-      const x =
-        this.leftMargin + (graphWidth / (timeLabels.length - 1)) * i;
-      this.ctx.fillText(timeLabels[i], x, this.topMargin + graphHeight + 4);
+    const decimals = timeStep < 1 ? 1 : 0;
+    const labelList: string[] = [];
+    for (let i = 0; i <= numSteps; i++) {
+      const tS = -(windowS - (windowS / numSteps) * i);
+      const label = tS === 0 ? "0" : `${tS.toFixed(decimals)}s`;
+      const x = this.leftMargin + (graphWidth / numSteps) * i;
+      this.ctx.fillText(label, x, this.topMargin + graphHeight + 4);
+      labelList.push(`${label}@x${x.toFixed(0)}`);
+    }
+    // DEBUG: log once per second (every ~60 frames)
+    if (!this._dbgFrame) this._dbgFrame = 0;
+    if (++this._dbgFrame % 60 === 0) {
+      console.log(`[SpectroLabels] timeStep=${timeStep} numSteps=${numSteps} windowS=${windowS.toFixed(2)} labels: ${labelList.join(', ')}`);
     }
   }
 }
@@ -784,6 +865,21 @@ export class SpeechActivityRenderer {
   }
 
   // ---------------------------------------------------------------------------
+  // Configuration
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update the expected time interval between visualization frames.
+   * Must be called whenever the audio source changes so that the x-axis time
+   * labels reflect the actual elapsed time rather than a hardcoded default.
+   *
+   * @param frameIntervalMs - Milliseconds per visualization frame (e.g. 10.0).
+   */
+  configure(frameIntervalMs: number): void {
+    this.frameIntervalMs = frameIntervalMs;
+  }
+
+  // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
@@ -1064,19 +1160,26 @@ export class SpeechActivityRenderer {
   ): void {
     const barHeight = area.height;
     const bs = this.bufferSize;
-    this.ctx.strokeStyle = cssVar(
+    this.ctx.fillStyle = cssVar(
       "--vtx-speech-word-break",
       "rgba(249,115,22,0.85)"
     );
-    this.ctx.lineWidth = 2;
 
-    for (let i = 0; i < wordBreaks.length; i++) {
-      if (wordBreaks[i] === 1 && i < speaking.length && speaking[i] === 1) {
-        const x = area.x + (i / bs) * area.width;
-        this.ctx.beginPath();
-        this.ctx.moveTo(x, area.y);
-        this.ctx.lineTo(x, area.y + barHeight);
-        this.ctx.stroke();
+    let inBreak = false;
+    let startX = 0;
+    for (let i = 0; i <= wordBreaks.length; i++) {
+      const isWb =
+        i < wordBreaks.length &&
+        wordBreaks[i] === 1 &&
+        i < speaking.length &&
+        speaking[i] === 1;
+      const x = area.x + (i / bs) * area.width;
+      if (isWb && !inBreak) {
+        inBreak = true;
+        startX = x;
+      } else if (!isWb && inBreak) {
+        inBreak = false;
+        this.ctx.fillRect(startX, area.y, x - startX, barHeight);
       }
     }
   }
@@ -1208,6 +1311,15 @@ export class SpeechActivityRenderer {
     const graphWidth = width - this.leftMargin - this.rightMargin;
     const graphHeight = height - this.topMargin - this.bottomMargin;
 
+    // The speech bar and word-break bar each occupy 8% of graphHeight at the
+    // top of the drawable area.  Threshold lines and dB labels must be
+    // positioned relative to the metrics area that sits below those two bars,
+    // so that they align with the amplitude (and other metric) lines.
+    const barsHeightFraction = 0.08 + 0.08; // speech bar + word-break bar
+    const barsOffset = graphHeight * barsHeightFraction;
+    const metricsTop = this.topMargin + barsOffset;
+    const metricsHeight = graphHeight - barsOffset;
+
     this.ctx.strokeStyle = gridColor;
     this.ctx.lineWidth = 1;
 
@@ -1218,15 +1330,28 @@ export class SpeechActivityRenderer {
       this.ctx.lineTo(this.leftMargin + graphWidth, y);
       this.ctx.stroke();
     }
-    for (let i = 0; i <= 16; i++) {
-      const x = this.leftMargin + (graphWidth / 16) * i;
+    // Vertical grid lines — one every 0.1 s, anchored to absolute time so the
+    // grid scrolls naturally with the data.
+    // The visible window spans (bufferSize - 1) frames, each frameIntervalMs wide.
+    const windowS = (this.bufferSize - 1) * this.frameIntervalMs / 1000;
+    // Time at the left and right edges of the visible window.
+    const gridLeftTimeS = -((this.bufferSize - 1) + this.scrollOffset) * this.frameIntervalMs / 1000;
+    const gridRightTimeS = -(this.scrollOffset * this.frameIntervalMs / 1000);
+    const gridStepS = 0.1;
+    // First grid line at or after the left edge.
+    const firstGridS = Math.ceil(gridLeftTimeS / gridStepS) * gridStepS;
+    for (let tS = firstGridS; tS <= gridRightTimeS + 1e-9; tS += gridStepS) {
+      const tRounded = Math.round(tS / gridStepS) * gridStepS;
+      const fraction = (tRounded - gridLeftTimeS) / windowS;
+      const x = this.leftMargin + fraction * graphWidth;
       this.ctx.beginPath();
       this.ctx.moveTo(x, this.topMargin);
       this.ctx.lineTo(x, this.topMargin + graphHeight);
       this.ctx.stroke();
     }
 
-    // Threshold lines
+    // Threshold lines — positioned within metricsArea so they align with the
+    // amplitude line which is drawn using metricsArea coordinates.
     const thresholdColor = cssVar(
       "--vtx-threshold-line",
       "rgba(255,255,255,0.15)"
@@ -1235,51 +1360,57 @@ export class SpeechActivityRenderer {
     this.ctx.lineWidth = 1.5;
 
     const voicedY =
-      this.topMargin +
-      graphHeight -
+      metricsTop +
+      metricsHeight -
       ((this.voicedThresholdDb - this.minDb) / (this.maxDb - this.minDb)) *
-        graphHeight;
+        metricsHeight;
     this.ctx.beginPath();
     this.ctx.moveTo(this.leftMargin, voicedY);
     this.ctx.lineTo(this.leftMargin + graphWidth, voicedY);
     this.ctx.stroke();
 
     const whisperY =
-      this.topMargin +
-      graphHeight -
+      metricsTop +
+      metricsHeight -
       ((this.whisperThresholdDb - this.minDb) / (this.maxDb - this.minDb)) *
-        graphHeight;
+        metricsHeight;
     this.ctx.beginPath();
     this.ctx.moveTo(this.leftMargin, whisperY);
     this.ctx.lineTo(this.leftMargin + graphWidth, whisperY);
     this.ctx.stroke();
 
-    // Y-axis labels
+    // Y-axis labels — also positioned within metricsArea.
     this.ctx.fillStyle = textColor;
     this.ctx.font = "9px system-ui, sans-serif";
     this.ctx.textAlign = "right";
     this.ctx.textBaseline = "middle";
     for (const db of [0, -20, -40, -50, -60]) {
       const normalizedY = (db - this.minDb) / (this.maxDb - this.minDb);
-      const y = this.topMargin + graphHeight - normalizedY * graphHeight;
+      const y = metricsTop + metricsHeight - normalizedY * metricsHeight;
       const label = db === -40 ? "-40V" : db === -50 ? "-50W" : `${db}`;
       this.ctx.fillText(label, this.leftMargin - 3, y);
     }
 
-    // X-axis labels — computed dynamically from frame interval and scroll offset
+    // X-axis labels — one every 0.5 s, aligned to the vertical grid lines.
+    // The window spans windowS seconds; labels are placed at multiples of 0.5 s
+    // from the left edge, accounting for scrollOffset so they reflect the
+    // actual time being displayed.
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "top";
-    const numLabels = 6;
-    for (let i = 0; i < numLabels; i++) {
-      // Column index within the bufferSize window, evenly spaced.
-      const colIndex = Math.round(((this.bufferSize - 1) / (numLabels - 1)) * i);
-      // Time relative to the live head (negative = in the past).
-      const t =
-        -(this.bufferSize - 1 - colIndex + this.scrollOffset) *
-        this.frameIntervalMs /
-        1000;
-      const label = `${t.toFixed(1)}s`;
-      const x = this.leftMargin + (graphWidth / (numLabels - 1)) * i;
+    const labelStepS = 0.5;
+    // The time at the left edge of the visible window (relative to live head).
+    const leftTimeS = -((this.bufferSize - 1) + this.scrollOffset) * this.frameIntervalMs / 1000;
+    // The time at the right edge of the visible window.
+    const rightTimeS = -(this.scrollOffset * this.frameIntervalMs / 1000);
+    // First label: the smallest multiple of 0.5 s that is >= leftTimeS.
+    const firstLabelS = Math.ceil(leftTimeS / labelStepS) * labelStepS;
+    for (let tS = firstLabelS; tS <= rightTimeS + 1e-9; tS += labelStepS) {
+      // Round to avoid floating-point drift.
+      const tRounded = Math.round(tS / labelStepS) * labelStepS;
+      const label = tRounded === 0 ? "0" : `${tRounded.toFixed(1)}s`;
+      // Map tRounded to a canvas X position.
+      const fraction = (tRounded - leftTimeS) / (rightTimeS - leftTimeS);
+      const x = this.leftMargin + fraction * graphWidth;
       this.ctx.fillText(label, x, this.topMargin + graphHeight + 4);
     }
   }

@@ -428,17 +428,32 @@ function setupEventListeners() {
 
 async function setupBackendListeners() {
   // Visualization data
+  let lastSampleRate = 0;
+  let lastFrameIntervalMs = 0;
   await listen<VisualizationPayload>("visualization-data", (event) => {
     const data = event.payload;
+
+    // Keep renderers calibrated to the actual audio source parameters so that
+    // time-axis labels reflect real elapsed time.
+    if (data.sample_rate && data.sample_rate !== lastSampleRate) {
+      lastSampleRate = data.sample_rate;
+      spectrogramRenderer.configure(data.sample_rate);
+    }
+    if (data.frame_interval_ms && data.frame_interval_ms !== lastFrameIntervalMs) {
+      lastFrameIntervalMs = data.frame_interval_ms;
+      speechActivityRenderer.configure(data.frame_interval_ms);
+    }
 
     // Push waveform samples
     if (data.waveform && data.waveform.length > 0) {
       waveformRenderer.pushSamples(data.waveform);
     }
 
-    // Push spectrogram column
+    // Push spectrogram columns (one per completed FFT window in this chunk)
     if (data.spectrogram) {
-      spectrogramRenderer.pushColumn(data.spectrogram.colors);
+      for (const col of data.spectrogram) {
+        spectrogramRenderer.pushColumn(col.colors);
+      }
     }
 
     // Push speech metrics

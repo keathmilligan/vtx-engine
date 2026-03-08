@@ -209,12 +209,14 @@ impl SpeechDetector {
     /// - Voiced mode: -42dB threshold, ZCR 0.01-0.30, centroid 200-5500Hz, 80ms onset
     /// - Whisper mode: -52dB threshold, ZCR 0.08-0.45, centroid 300-7000Hz, 120ms onset
     /// - Transient rejection: ZCR > 0.45 AND centroid > 6500Hz
-    /// - Hold time: 300ms
+    /// - Hold time: 200ms (reduced from 300ms to detect sentence-end pauses from fast talkers)
     /// - Onset grace period: 30ms (brief dips in features don't reset onset counters)
     /// - Lookback buffer: 200ms (covers max onset time + margin)
     /// - Lookback threshold: -55dB (more sensitive to catch speech starts)
+    /// - Word break min gap: 40ms (reduced from 80ms to catch fast-talker inter-word gaps)
+    /// - Word break threshold ratio: 0.25 (25% of rolling average, tuned for dense speech)
     pub fn with_defaults(sample_rate: u32) -> Self {
-        let hold_samples = (sample_rate as u64 * 300 / 1000) as u32;
+        let hold_samples = (sample_rate as u64 * 200 / 1000) as u32;
         // 200ms lookback buffer
         let lookback_capacity = (sample_rate as u64 * 200 / 1000) as usize;
 
@@ -261,13 +263,12 @@ impl SpeechDetector {
 
             // Word break detection initialization
             // Threshold ratio: amplitude must drop to this fraction of recent average
-            // Using 0.3 (30%) to be more conservative and avoid false positives
-            word_break_threshold_ratio: 0.3,
-            // Minimum gap duration: 80ms - shorter gaps are likely within-word pauses
-            // (was 15ms which was far too aggressive)
-            min_word_break_samples: (sample_rate as u64 * 80 / 1000) as u32,
+            // Using 0.25 (25%) to be sensitive enough to catch dips in dense fast speech
+            word_break_threshold_ratio: 0.25,
+            // Minimum gap duration: 40ms - catches fast-talker inter-word gaps (~40-70ms)
+            // (was 80ms which missed all fast-talker gaps; was previously 15ms which was too aggressive)
+            min_word_break_samples: (sample_rate as u64 * 40 / 1000) as u32,
             // Maximum gap duration: 250ms - longer gaps will trigger speech-end instead
-            // (was 200ms which excluded natural sentence pauses)
             max_word_break_samples: (sample_rate as u64 * 250 / 1000) as u32,
             recent_speech_window_samples: (sample_rate as u64 * 100 / 1000) as u32,
             recent_speech_amplitude_sum: 0.0,
@@ -743,8 +744,8 @@ pub struct SpectrogramColumn {
 pub struct VisualizationPayload {
     /// Pre-downsampled waveform amplitudes
     pub waveform: Vec<f32>,
-    /// Spectrogram column with RGB colors (present when FFT buffer fills)
-    pub spectrogram: Option<SpectrogramColumn>,
+    /// Spectrogram columns with RGB colors (one per completed FFT window)
+    pub spectrogram: Vec<SpectrogramColumn>,
     /// Speech detection metrics (present when speech processor is active)
     pub speech_metrics: Option<SpeechMetrics>,
 }
@@ -1027,34 +1028,33 @@ impl VisualizationProcessor {
         output
     }
 
-    /// Process audio samples for visualization
     /// Process audio samples for visualization.
     ///
     /// Returns the visualization payload. Also calls the callback if set.
+    /// A single call may produce zero, one, or multiple spectrogram columns
+    /// depending on the chunk size relative to the FFT size (512 samples).
     pub fn process(&mut self, samples: &[f32]) -> Option<crate::VisualizationData> {
-        // Accumulate samples for FFT
+        let mut spectrogram_columns: Vec<SpectrogramColumn> = Vec::new();
+
+        // Accumulate samples for FFT, producing a column each time the buffer
+        // fills.  This avoids dropping samples when the incoming chunk is larger
+        // than the FFT size.
         for &sample in samples {
-            if self.fft_write_index < self.fft_size {
-                if self.fft_buffer.len() <= self.fft_write_index {
-                    self.fft_buffer.push(sample);
-                } else {
-                    self.fft_buffer[self.fft_write_index] = sample;
-                }
-                self.fft_write_index += 1;
+            if self.fft_buffer.len() <= self.fft_write_index {
+                self.fft_buffer.push(sample);
+            } else {
+                self.fft_buffer[self.fft_write_index] = sample;
+            }
+            self.fft_write_index += 1;
+
+            if self.fft_write_index >= self.fft_size {
+                spectrogram_columns.push(self.process_fft());
+                self.fft_write_index = 0;
             }
         }
 
         // Accumulate samples for waveform
         self.waveform_buffer.extend_from_slice(samples);
-
-        // Check if FFT buffer is full
-        let spectrogram = if self.fft_write_index >= self.fft_size {
-            let column = self.process_fft();
-            self.fft_write_index = 0;
-            Some(column)
-        } else {
-            None
-        };
 
         // Downsample waveform
         let waveform = self.downsample_waveform(&self.waveform_buffer);
@@ -1066,7 +1066,7 @@ impl VisualizationProcessor {
         // Build internal payload
         let payload = VisualizationPayload {
             waveform: waveform.clone(),
-            spectrogram: spectrogram.clone(),
+            spectrogram: spectrogram_columns.clone(),
             speech_metrics: speech_metrics.clone(),
         };
 
@@ -1074,10 +1074,17 @@ impl VisualizationProcessor {
             callback.on_visualization_data(payload);
         }
 
+        // Duration of this chunk in milliseconds — used by the frontend to
+        // correctly place time labels on the speech-activity graph.
+        let frame_interval_ms = samples.len() as f32 / self.sample_rate as f32 * 1000.0;
+
         // Convert to public types and return
         let viz = crate::VisualizationData {
             waveform,
-            spectrogram: spectrogram.map(|s| crate::SpectrogramColumn { colors: s.colors }),
+            spectrogram: spectrogram_columns
+                .into_iter()
+                .map(|s| crate::SpectrogramColumn { colors: s.colors })
+                .collect(),
             speech_metrics: speech_metrics.map(|m| crate::SpeechMetrics {
                 amplitude_db: m.amplitude_db,
                 zcr: m.zcr,
@@ -1089,6 +1096,8 @@ impl VisualizationProcessor {
                 is_lookback_speech: m.is_lookback_speech,
                 is_word_break: m.is_word_break,
             }),
+            sample_rate: self.sample_rate,
+            frame_interval_ms,
         };
 
         Some(viz)

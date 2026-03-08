@@ -434,12 +434,18 @@ pub struct SpectrogramColumn {
 pub struct VisualizationData {
     /// Waveform amplitude values (downsampled for display)
     pub waveform: Vec<f32>,
-    /// Spectrogram column (RGB color values, if ready)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spectrogram: Option<SpectrogramColumn>,
+    /// Spectrogram columns (RGB color values, one per completed FFT window)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spectrogram: Vec<SpectrogramColumn>,
     /// Speech detection metrics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speech_metrics: Option<SpeechMetrics>,
+    /// Sample rate of the audio source in Hz (e.g. 48000).
+    /// Allows the frontend to compute the true time span of the spectrogram.
+    pub sample_rate: u32,
+    /// Duration of the audio chunk that produced this frame, in milliseconds.
+    /// Used by the frontend to correctly scale speech-activity time labels.
+    pub frame_interval_ms: f32,
 }
 
 /// Speech detection metrics for visualization and analysis.

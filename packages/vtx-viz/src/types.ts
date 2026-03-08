@@ -32,8 +32,12 @@ export interface SpeechMetrics {
 export interface VisualizationPayload {
   /** Pre-downsampled waveform amplitudes. */
   waveform: number[];
-  /** Spectrogram column (present when FFT buffer fills). */
-  spectrogram: SpectrogramColumn | null;
+  /** Spectrogram columns (one per completed FFT window in this chunk). */
+  spectrogram?: SpectrogramColumn[];
   /** Speech detection metrics (present when speech processor is active). */
   speech_metrics: SpeechMetrics | null;
+  /** Sample rate of the audio source in Hz (e.g. 48000). */
+  sample_rate: number;
+  /** Duration of the audio chunk that produced this frame, in milliseconds. */
+  frame_interval_ms: number;
 }

@@ -22,13 +22,18 @@ const MANUAL_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30 * 2;
 /// Overflow threshold: 90% of buffer capacity
 const OVERFLOW_THRESHOLD_PERCENT: usize = 90;
 
-/// Maximum segment duration before seeking word break
+/// Maximum segment duration before seeking word break (force-split safety net)
 const MAX_SEGMENT_DURATION_MS: u64 = 4000;
 
-/// Grace period after duration threshold before forcing segment submission (500ms)
+/// Grace period after duration threshold before forcing segment submission
 const WORD_BREAK_GRACE_MS: u64 = 750;
 
-/// Minimum segment duration to submit for transcription (200ms)
+/// Minimum segment duration before word-break events are allowed to split the segment.
+/// Below this threshold, word breaks are ignored so that short utterances and individual
+/// words are not fragmented. 2000ms represents a comfortable minimum for a short sentence.
+const WORD_BREAK_ACTIVATION_MS: u64 = 2000;
+
+/// Minimum segment duration to submit for transcription
 /// Segments shorter than this are likely to produce [BLANK_AUDIO] from Whisper
 const MIN_SEGMENT_DURATION_MS: u64 = 500;
 
@@ -213,6 +218,12 @@ pub struct TranscribeState {
     word_break_seek_start_samples: u64,
     /// Number of lookback samples at the start of the current segment
     lookback_sample_count: usize,
+    /// Cumulative VAD time (ms) consumed by word-break splits within this speech utterance.
+    /// The VAD's speech_sample_count is never reset between splits, so offset_ms values are
+    /// always relative to the original speech-confirmed start. This field tracks how much of
+    /// that cumulative time has already been extracted, so each word-break offset can be
+    /// made relative to the current segment start.
+    vad_offset_base_ms: u64,
     /// Callback for state events
     callback: Option<Arc<dyn TranscribeStateCallback>>,
     /// Manual recording mode - disables automatic VAD segmentation.
@@ -244,6 +255,7 @@ impl TranscribeState {
             seeking_word_break: false,
             word_break_seek_start_samples: 0,
             lookback_sample_count: 0,
+            vad_offset_base_ms: 0,
             callback: None,
             manual_recording: false,
             manual_audio_buffer: Vec::new(),
@@ -379,6 +391,7 @@ impl TranscribeState {
         self.seeking_word_break = false;
         self.word_break_seek_start_samples = 0;
         self.lookback_sample_count = 0;
+        self.vad_offset_base_ms = 0;
         self.manual_audio_buffer.clear();
         self.manual_buffer_full_warned = false;
     }
@@ -392,6 +405,7 @@ impl TranscribeState {
         self.seeking_word_break = false;
         self.word_break_seek_start_samples = 0;
         self.lookback_sample_count = 0;
+        self.vad_offset_base_ms = 0;
     }
 
     /// Deactivate transcribe mode
@@ -531,6 +545,8 @@ impl TranscribeState {
         self.seeking_word_break = false;
         // Remember lookback count (in stereo samples) for proper word break extraction
         self.lookback_sample_count = lookback_stereo_samples;
+        // Reset the VAD offset base: this is a fresh utterance so cumulative VAD time starts at 0
+        self.vad_offset_base_ms = 0;
         tracing::debug!(
             "[TranscribeState] Speech started, segment_start_idx={}, lookback={} mono -> {} stereo",
             self.segment_start_idx,
@@ -585,7 +601,8 @@ impl TranscribeState {
         frames * self.channels as u64
     }
 
-    /// Handle word-break event: if seeking a word break, extract and submit segment
+    /// Handle word-break event: extract and submit the current segment at the word break point,
+    /// provided the segment is long enough to be valid.
     ///
     /// Parameters:
     /// - `offset_ms`: Offset from speech start where the word break gap started (from speech detector)
@@ -596,8 +613,31 @@ impl TranscribeState {
     /// Note: We extract at the START of the gap (minus a small margin) rather than the midpoint.
     /// This ensures we capture all speech before the pause and don't accidentally cut into
     /// the end of a word. The next segment will naturally start from this point.
+    ///
+    /// Word breaks are acted on at any point during active speech (not only after the
+    /// MAX_SEGMENT_DURATION_MS threshold) so that fast talkers whose inter-sentence pauses
+    /// are shorter than hold_samples still get clean segment boundaries.
     pub fn on_word_break(&mut self, offset_ms: u32, gap_duration_ms: u32) -> Option<Vec<f32>> {
-        if !self.is_active || !self.in_speech || !self.seeking_word_break {
+        if !self.is_active || !self.in_speech {
+            return None;
+        }
+
+        // The VAD's offset_ms is cumulative from the original speech-confirmed start and is
+        // never reset between word-break splits. Subtract vad_offset_base_ms to get the
+        // offset relative to the start of the current (post-split) segment.
+        let relative_offset_ms = (offset_ms as u64).saturating_sub(self.vad_offset_base_ms);
+
+        // Only split at word breaks once enough speech has accumulated in the current segment
+        // to represent a complete phrase or sentence.
+        let current_duration_ms = self.samples_to_ms(self.segment_sample_count);
+        if current_duration_ms < WORD_BREAK_ACTIVATION_MS {
+            tracing::debug!(
+                "[TranscribeState] Word break at vad_offset {}ms (relative {}ms) ignored (segment only {}ms < {}ms activation threshold)",
+                offset_ms,
+                relative_offset_ms,
+                current_duration_ms,
+                WORD_BREAK_ACTIVATION_MS
+            );
             return None;
         }
 
@@ -608,7 +648,7 @@ impl TranscribeState {
         // Calculate extraction point: start of the word break gap, with safety margin
         // Using gap start (not midpoint) ensures we don't cut into the preceding word
         // The margin backs up slightly to ensure we capture any trailing sounds
-        let gap_start_ms = offset_ms as u64;
+        let gap_start_ms = relative_offset_ms;
         let extraction_point_ms = gap_start_ms.saturating_sub(WORD_BREAK_PRE_MARGIN_MS);
         let extraction_point_samples = self.ms_to_samples(extraction_point_ms);
 
@@ -651,8 +691,9 @@ impl TranscribeState {
         }
 
         tracing::debug!(
-            "[TranscribeState] Timed segment at word break (offset: {}ms, gap: {}ms), extracted {} samples ({} lookback + {} speech) at extraction point {}ms",
+            "[TranscribeState] Word break split (vad_offset: {}ms, relative: {}ms, gap: {}ms), extracted {} samples ({} lookback + {} speech) at extraction point {}ms",
             offset_ms,
+            relative_offset_ms,
             gap_duration_ms,
             segment.len(),
             self.lookback_sample_count,
@@ -671,7 +712,12 @@ impl TranscribeState {
         self.segment_sample_count = self
             .segment_sample_count
             .saturating_sub(extraction_point_samples);
+        // Advance the VAD offset base by the extraction point so the next word-break offset
+        // is correctly relativised to the start of the new segment.
+        self.vad_offset_base_ms += extraction_point_ms;
+        // Reset force-split seek state - we just cleanly split, so the grace timer restarts
         self.seeking_word_break = false;
+        self.word_break_seek_start_samples = 0;
 
         Some(segment)
     }
