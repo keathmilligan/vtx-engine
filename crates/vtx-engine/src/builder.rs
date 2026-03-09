@@ -309,6 +309,7 @@ impl EngineBuilder {
         let transcribe_state = Arc::new(std::sync::Mutex::new(ts));
 
         let initial_mic_gain_bits = self.config.mic_gain_db.to_bits();
+        let initial_agc_config = self.config.agc.clone();
         let engine = AudioEngine {
             config: self.config,
             sender,
@@ -327,6 +328,7 @@ impl EngineBuilder {
             playback_active: Arc::new(AtomicBool::new(false)),
             mic_gain_db: Arc::new(AtomicU32::new(initial_mic_gain_bits)),
             ptt_mode: Arc::new(AtomicBool::new(true)),
+            agc_config: Arc::new(std::sync::Mutex::new(initial_agc_config)),
         };
 
         Ok((engine, receiver))

@@ -49,6 +49,16 @@ interface TranscriptionSegment {
 
 const SETTINGS_KEY = "vtx-demo-settings";
 
+/** Mirror of the Rust AgcConfig struct. */
+interface AgcConfig {
+  enabled: boolean;
+  target_level_db: number;
+  attack_time_ms: number;
+  release_time_ms: number;
+  min_gain_db: number;
+  max_gain_db: number;
+}
+
 /** Mirror of the Rust EngineConfig struct (snake_case matches serde output). */
 interface EngineConfig {
   recording_mode: "mixed" | "echo_cancel";
@@ -63,6 +73,7 @@ interface EngineConfig {
   transcription_queue_capacity: number;
   viz_frame_interval_ms: number;
   word_break_segmentation_enabled: boolean;
+  agc: AgcConfig;
 }
 
 interface AppSettings {
@@ -84,6 +95,9 @@ interface AppSettings {
   vizFrameIntervalMs: number;
   wordBreakSegmentationEnabled: boolean;
   audioOutputDeviceId: string;
+  // AGC fields
+  agcEnabled: boolean;
+  agcTargetLevelDb: number;
 }
 
 function loadSettings(): AppSettings {
@@ -118,6 +132,9 @@ function defaultSettings(): AppSettings {
     vizFrameIntervalMs: 16,
     wordBreakSegmentationEnabled: true,
     audioOutputDeviceId: "",
+    // AGC defaults (must match Rust AgcConfig defaults)
+    agcEnabled: false,
+    agcTargetLevelDb: -18.0,
   };
 }
 
@@ -991,6 +1008,9 @@ const configCaptureWarning = document.getElementById("config-capture-warning") a
 // Audio Input
 const cfgMicGain = document.getElementById("cfg-mic-gain") as HTMLInputElement;
 const cfgMicGainDisplay = document.getElementById("cfg-mic-gain-display") as HTMLSpanElement;
+const cfgAgcEnabled = document.getElementById("cfg-agc-enabled") as HTMLInputElement;
+const cfgAgcTargetLevel = document.getElementById("cfg-agc-target-level") as HTMLInputElement;
+const cfgAgcTargetLevelDisplay = document.getElementById("cfg-agc-target-level-display") as HTMLSpanElement;
 
 // Voice Detection
 const cfgVadVoicedThreshold = document.getElementById("cfg-vad-voiced-threshold") as HTMLInputElement;
@@ -1017,6 +1037,11 @@ const cfgOutputUnsupported = document.getElementById("cfg-output-unsupported") a
 function populateConfigForm(cfg: EngineConfig): void {
   cfgMicGain.value = String(cfg.mic_gain_db);
   updateGainDisplay(cfg.mic_gain_db);
+  // AGC
+  cfgAgcEnabled.checked = cfg.agc.enabled;
+  cfgAgcTargetLevel.value = String(cfg.agc.target_level_db);
+  cfgAgcTargetLevel.disabled = !cfg.agc.enabled;
+  updateAgcTargetDisplay(cfg.agc.target_level_db);
   cfgVadVoicedThreshold.value = String(cfg.vad_voiced_threshold_db);
   cfgVadWhisperThreshold.value = String(cfg.vad_whisper_threshold_db);
   cfgVadVoicedOnset.value = String(cfg.vad_voiced_onset_ms);
@@ -1037,6 +1062,15 @@ function readConfigForm(): EngineConfig {
     // config panel never accidentally resets it.
     recording_mode: aecEnabled ? "echo_cancel" : "mixed",
     mic_gain_db: parseFloat(cfgMicGain.value),
+    agc: {
+      enabled: cfgAgcEnabled.checked,
+      target_level_db: parseFloat(cfgAgcTargetLevel.value),
+      // Non-exposed fields use AgcConfig defaults.
+      attack_time_ms: 10.0,
+      release_time_ms: 200.0,
+      min_gain_db: -6.0,
+      max_gain_db: 30.0,
+    },
     vad_voiced_threshold_db: parseFloat(cfgVadVoicedThreshold.value),
     vad_whisper_threshold_db: parseFloat(cfgVadWhisperThreshold.value),
     vad_voiced_onset_ms: parseInt(cfgVadVoicedOnset.value, 10),
@@ -1054,6 +1088,11 @@ function readConfigForm(): EngineConfig {
 function updateGainDisplay(db: number): void {
   const sign = db > 0 ? "+" : "";
   cfgMicGainDisplay.textContent = `${sign}${db.toFixed(1)} dB`;
+}
+
+/** Update the live dBFS readout next to the AGC target level slider. */
+function updateAgcTargetDisplay(db: number): void {
+  cfgAgcTargetLevelDisplay.textContent = `${db.toFixed(1)} dBFS`;
 }
 
 /** Populate the output device selector from the browser's device list. */
@@ -1176,6 +1215,8 @@ async function saveConfig(): Promise<void> {
   const updated: AppSettings = {
     ...s,
     micGainDb: cfg.mic_gain_db,
+    agcEnabled: cfg.agc.enabled,
+    agcTargetLevelDb: cfg.agc.target_level_db,
     vadVoicedThresholdDb: cfg.vad_voiced_threshold_db,
     vadWhisperThresholdDb: cfg.vad_whisper_threshold_db,
     vadVoicedOnsetMs: cfg.vad_voiced_onset_ms,
@@ -1206,6 +1247,14 @@ function settingsToEngineConfig(s: AppSettings): EngineConfig {
   return {
     recording_mode: s.aecEnabled ? "echo_cancel" : "mixed",
     mic_gain_db: s.micGainDb,
+    agc: {
+      enabled: s.agcEnabled,
+      target_level_db: s.agcTargetLevelDb,
+      attack_time_ms: 10.0,
+      release_time_ms: 200.0,
+      min_gain_db: -6.0,
+      max_gain_db: 30.0,
+    },
     vad_voiced_threshold_db: s.vadVoicedThresholdDb,
     vad_whisper_threshold_db: s.vadWhisperThresholdDb,
     vad_voiced_onset_ms: s.vadVoicedOnsetMs,
@@ -1234,6 +1283,16 @@ function setupConfigPanelListeners(): void {
   // Live dB readout on slider input (task 9.1)
   cfgMicGain.addEventListener("input", () => {
     updateGainDisplay(parseFloat(cfgMicGain.value));
+  });
+
+  // AGC: toggle slider enabled state when checkbox changes
+  cfgAgcEnabled.addEventListener("change", () => {
+    cfgAgcTargetLevel.disabled = !cfgAgcEnabled.checked;
+  });
+
+  // Live dBFS readout on AGC target level slider input
+  cfgAgcTargetLevel.addEventListener("input", () => {
+    updateAgcTargetDisplay(parseFloat(cfgAgcTargetLevel.value));
   });
 }
 

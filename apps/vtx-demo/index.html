@@ -154,6 +154,17 @@
               <span id="cfg-mic-gain-display" class="config-slider-display">0.0 dB</span>
             </div>
           </div>
+          <div class="config-field config-field-inline">
+            <label for="cfg-agc-enabled">Auto Gain Control (AGC)</label>
+            <input type="checkbox" id="cfg-agc-enabled" />
+          </div>
+          <div class="config-field">
+            <label for="cfg-agc-target-level">AGC Target Level</label>
+            <div class="config-slider-row">
+              <input type="range" id="cfg-agc-target-level" min="-40" max="0" step="0.5" value="-18" disabled />
+              <span id="cfg-agc-target-level-display" class="config-slider-display">-18.0 dBFS</span>
+            </div>
+          </div>
         </section>
 
         <!-- Voice Detection -->

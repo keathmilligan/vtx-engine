@@ -106,9 +106,42 @@ pub fn save_to_wav(
     Ok(())
 }
 
-/// Generate a timestamped filename for recording.
+/// Generate a timestamped filename for a VAD segment WAV.
+///
+/// Includes milliseconds to avoid collisions with the session-level
+/// raw/processed WAV pair (which uses second-resolution timestamps via
+/// [`generate_recording_stem`]).
 pub fn generate_recording_filename() -> String {
     use chrono::Utc;
     let now = Utc::now();
-    format!("vtx-{}.wav", now.format("%Y%m%d-%H%M%S"))
+    format!("vtx-{}.wav", now.format("%Y%m%d-%H%M%S%.3f"))
+}
+
+/// Generate a timestamped stem (without extension) for recording file pairs.
+///
+/// Use this when saving multiple related files (e.g., raw + processed) so that
+/// both share the same timestamp and differ only by suffix:
+/// - `<stem>.wav`           — raw audio
+/// - `<stem>-processed.wav` — gain/AGC-processed mono audio
+pub fn generate_recording_stem() -> String {
+    use chrono::Utc;
+    let now = Utc::now();
+    format!("vtx-{}", now.format("%Y%m%d-%H%M%S"))
+}
+
+/// Extract the recording stem from an existing WAV file path.
+///
+/// Given a path like `…/vtx-20260308-143022.wav` or
+/// `…/vtx-20260308-143022-processed.wav`, returns `Some("vtx-20260308-143022")`.
+/// Returns `None` if the filename doesn't follow the expected pattern.
+pub fn extract_recording_stem(path: &std::path::Path) -> Option<String> {
+    let file_stem = path.file_stem()?.to_str()?;
+    // Strip the `-processed` suffix if present to get the base stem.
+    let base = file_stem.strip_suffix("-processed").unwrap_or(file_stem);
+    // Validate it looks like a vtx recording stem (vtx-YYYYMMDD-HHMMSS).
+    if base.starts_with("vtx-") && base.len() >= "vtx-YYYYMMDD-HHMMSS".len() {
+        Some(base.to_string())
+    } else {
+        None
+    }
 }

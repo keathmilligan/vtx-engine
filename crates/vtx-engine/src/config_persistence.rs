@@ -99,4 +99,39 @@ mod tests {
         let loaded: EngineConfig = toml::from_str(&toml_str).expect("should deserialize");
         assert_eq!(loaded.mic_gain_db, 6.0);
     }
+
+    /// 4.1: A TOML file without an `[agc]` section deserialises with AGC disabled.
+    #[test]
+    fn partial_toml_without_agc_gets_default_disabled() {
+        let toml = r#"recording_mode = "echo_cancel""#;
+        let config: EngineConfig = toml::from_str(toml).expect("should parse");
+        assert!(!config.agc.enabled, "agc.enabled should default to false");
+        assert_eq!(config.agc.target_level_db, -18.0);
+        assert_eq!(config.agc.attack_time_ms, 10.0);
+        assert_eq!(config.agc.release_time_ms, 200.0);
+        assert_eq!(config.agc.min_gain_db, -6.0);
+        assert_eq!(config.agc.max_gain_db, 30.0);
+    }
+
+    /// 4.2: AgcConfig round-trips through TOML serialisation/deserialisation.
+    #[test]
+    fn agc_config_round_trips_through_toml() {
+        let mut config = EngineConfig::default();
+        config.agc = crate::AgcConfig {
+            enabled: true,
+            target_level_db: -20.0,
+            attack_time_ms: 15.0,
+            release_time_ms: 250.0,
+            min_gain_db: -3.0,
+            max_gain_db: 24.0,
+        };
+        let toml_str = toml::to_string_pretty(&config).expect("should serialize");
+        let loaded: EngineConfig = toml::from_str(&toml_str).expect("should deserialize");
+        assert!(loaded.agc.enabled);
+        assert_eq!(loaded.agc.target_level_db, -20.0);
+        assert_eq!(loaded.agc.attack_time_ms, 15.0);
+        assert_eq!(loaded.agc.release_time_ms, 250.0);
+        assert_eq!(loaded.agc.min_gain_db, -3.0);
+        assert_eq!(loaded.agc.max_gain_db, 24.0);
+    }
 }

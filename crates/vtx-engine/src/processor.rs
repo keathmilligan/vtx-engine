@@ -7,6 +7,8 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::AgcConfig;
+
 /// Speech state change events detected by the speech detector
 #[derive(Clone, Debug)]
 pub enum SpeechStateChange {
@@ -1244,5 +1246,347 @@ mod tests {
         // Basic sanity: we should have processed the whole file
         let expected_frames = (mono.len() + chunk_size - 1) / chunk_size;
         assert_eq!(frame_idx as usize, expected_frames);
+    }
+}
+
+// =============================================================================
+// AgcProcessor
+// =============================================================================
+
+/// Minimum power floor to prevent gain explosion on silence.
+const AGC_NOISE_FLOOR_POWER: f32 = 1e-10;
+
+/// Number of audio chunks between `AgcGainChanged` event emissions (~100 ms at
+/// 10 ms chunks; we count chunks and emit when the elapsed estimate exceeds the
+/// threshold, so the actual rate is approximate).
+const AGC_EVENT_INTERVAL_CHUNKS: u32 = 10;
+
+/// Automatic Gain Control processor.
+///
+/// Implements a feed-back RMS envelope follower with asymmetric attack/release
+/// exponential smoothing. All state is maintained between `process` calls; the
+/// processor is designed to run on a single dedicated thread with no allocations
+/// per chunk.
+///
+/// # Algorithm
+///
+/// Per chunk:
+/// 1. Compute `chunk_power = mean(s² for s in samples)`.
+/// 2. Select smoothing coefficient: attack (fast) when signal is growing,
+///    release (slow) when signal is falling.
+/// 3. Update envelope: `power = α * power + (1-α) * chunk_power`.
+/// 4. Compute gain: `gain = target_rms / sqrt(power)`, clamped to `[min, max]`.
+/// 5. Apply gain in-place; clamp each sample to `[-1.0, 1.0]`.
+pub struct AgcProcessor {
+    /// Current smoothed power estimate (linear, mean-squared).
+    power_estimate: f32,
+    /// Current linear gain applied to samples.
+    current_gain_linear: f32,
+    /// Active configuration (may be hot-swapped between chunks).
+    config: AgcConfig,
+    /// Chunk counter for throttling `AgcGainChanged` events.
+    chunks_since_event: u32,
+}
+
+impl AgcProcessor {
+    /// Create a new `AgcProcessor` initialised to a neutral state.
+    ///
+    /// Initial power is set to a small non-zero value so the first chunk does
+    /// not produce an extreme gain jump.
+    pub fn new(config: AgcConfig) -> Self {
+        Self {
+            power_estimate: 1e-6,
+            current_gain_linear: 1.0,
+            config,
+            chunks_since_event: 0,
+        }
+    }
+
+    /// Replace the active configuration.
+    ///
+    /// Takes effect on the next call to `process`. Safe to call from a different
+    /// thread when the processor is not mid-chunk (caller is responsible for
+    /// ensuring this, typically via `try_lock` on the capture thread).
+    pub fn update_config(&mut self, config: AgcConfig) {
+        self.config = config;
+    }
+
+    /// Process a chunk of mono samples in-place.
+    ///
+    /// When AGC is disabled (`config.enabled == false`) this is a no-op.
+    ///
+    /// Returns `Some(gain_db)` approximately every 100 ms (every
+    /// `AGC_EVENT_INTERVAL_CHUNKS` chunks) to signal that an
+    /// `AgcGainChanged` event should be broadcast. Returns `None` otherwise.
+    pub fn process(&mut self, samples: &mut [f32], _sample_rate: u32) -> Option<f32> {
+        if !self.config.enabled || samples.is_empty() {
+            return None;
+        }
+
+        // 1. Compute chunk power (mean squared).
+        let chunk_power: f32 = {
+            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+            sum_sq / samples.len() as f32
+        };
+
+        // 2. Select smoothing coefficient based on direction.
+        //    Chunk duration in seconds is approximated from the sample rate;
+        //    however since `_sample_rate` is informational, we rely on the
+        //    caller-supplied rate. For the envelope smoother, the absolute
+        //    time constant matters more than the per-chunk duration precision.
+        //    We use a nominal 10 ms chunk as the base time step.
+        let chunk_duration_s = samples.len() as f32 / _sample_rate as f32;
+        let alpha = if chunk_power > self.power_estimate {
+            // Signal getting louder → use attack (fast).
+            let tau = self.config.attack_time_ms / 1000.0;
+            (-chunk_duration_s / tau).exp()
+        } else {
+            // Signal getting quieter → use release (slow).
+            let tau = self.config.release_time_ms / 1000.0;
+            (-chunk_duration_s / tau).exp()
+        };
+
+        // 3. Update envelope estimate.
+        self.power_estimate = alpha * self.power_estimate + (1.0 - alpha) * chunk_power;
+
+        // 4. Compute gain, but only if above noise floor.
+        if self.power_estimate > AGC_NOISE_FLOOR_POWER {
+            let target_rms = db_to_linear(self.config.target_level_db);
+            let current_rms = self.power_estimate.sqrt();
+            let raw_gain = target_rms / current_rms;
+
+            let min_gain = db_to_linear(self.config.min_gain_db);
+            let max_gain = db_to_linear(self.config.max_gain_db);
+            self.current_gain_linear = raw_gain.clamp(min_gain, max_gain);
+        }
+        // If at or below noise floor, hold the current gain (don't amplify silence).
+
+        // 5. Apply gain in-place.
+        let g = self.current_gain_linear;
+        for s in samples.iter_mut() {
+            *s = (*s * g).clamp(-1.0, 1.0);
+        }
+
+        // 6. Throttle event emission.
+        self.chunks_since_event += 1;
+        if self.chunks_since_event >= AGC_EVENT_INTERVAL_CHUNKS {
+            self.chunks_since_event = 0;
+            Some(self.current_gain_db())
+        } else {
+            None
+        }
+    }
+
+    /// Return the current AGC gain in dB.
+    pub fn current_gain_db(&self) -> f32 {
+        linear_to_db(self.current_gain_linear)
+    }
+}
+
+/// Convert dBFS to a linear amplitude multiplier.
+#[inline]
+fn db_to_linear(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
+/// Convert a linear amplitude multiplier to dBFS.
+#[inline]
+fn linear_to_db(linear: f32) -> f32 {
+    if linear <= 0.0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * linear.log10()
+    }
+}
+
+#[cfg(test)]
+mod agc_tests {
+    use super::*;
+
+    /// Helper: generate a sine wave with a given RMS amplitude.
+    fn sine_wave(rms: f32, num_samples: usize, sample_rate: u32) -> Vec<f32> {
+        // RMS of a sine wave A*sin(t) is A/sqrt(2), so amplitude = rms * sqrt(2).
+        let amplitude = rms * 2f32.sqrt();
+        let freq = 440.0_f32;
+        (0..num_samples)
+            .map(|i| {
+                amplitude
+                    * (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin()
+            })
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        (sum_sq / samples.len() as f32).sqrt()
+    }
+
+    fn default_config() -> AgcConfig {
+        AgcConfig {
+            enabled: true,
+            target_level_db: -18.0,
+            attack_time_ms: 10.0,
+            release_time_ms: 200.0,
+            min_gain_db: -6.0,
+            max_gain_db: 30.0,
+        }
+    }
+
+    /// 2.6: Unity gain convergence — signal already at target level.
+    #[test]
+    fn agc_unity_gain_convergence() {
+        let sample_rate = 16000_u32;
+        let target_rms = db_to_linear(-18.0);
+        let cfg = default_config();
+        let mut proc = AgcProcessor::new(cfg);
+
+        // Feed 500 ms of audio at target level.
+        let chunk_size = 160; // 10 ms
+        let num_chunks = 50; // 500 ms
+
+        for _ in 0..num_chunks {
+            let mut chunk = sine_wave(target_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        // After convergence the gain should be within ±1 dB of 0 dB (linear ~1.0).
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db.abs() < 1.5,
+            "Expected gain near 0 dB after convergence, got {:.2} dB",
+            gain_db
+        );
+    }
+
+    /// 2.7: Gain increases for quiet input.
+    #[test]
+    fn agc_increases_gain_for_quiet_input() {
+        let sample_rate = 16000_u32;
+        let quiet_rms = db_to_linear(-40.0);
+        let cfg = default_config();
+        let mut proc = AgcProcessor::new(cfg);
+
+        // Feed 1000 ms of quiet audio (release time = 200 ms, so 5× release).
+        let chunk_size = 160;
+        for _ in 0..100 {
+            let mut chunk = sine_wave(quiet_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        // Gain should be significantly positive (above 10 dB).
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db > 10.0,
+            "Expected AGC to boost quiet input (>10 dB), got {:.2} dB",
+            gain_db
+        );
+    }
+
+    /// 2.8: Gain decreases for loud input.
+    #[test]
+    fn agc_decreases_gain_for_loud_input() {
+        let sample_rate = 16000_u32;
+        // 0 dBFS sine: amplitude = sqrt(2), but we clamp so use 0.99 RMS.
+        let loud_rms = db_to_linear(-1.0);
+        let cfg = default_config();
+        let mut proc = AgcProcessor::new(cfg);
+
+        let chunk_size = 160;
+        // Feed 500 ms of loud audio (attack = 10 ms, so 50× attack).
+        for _ in 0..50 {
+            let mut chunk = sine_wave(loud_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        // Gain should be negative dB (attenuating the signal).
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db < -1.0,
+            "Expected AGC to attenuate loud input (<-1 dB), got {:.2} dB",
+            gain_db
+        );
+    }
+
+    /// 2.9: Gain is clamped to max_gain_db.
+    #[test]
+    fn agc_clamps_to_max_gain() {
+        let sample_rate = 16000_u32;
+        let cfg = AgcConfig {
+            max_gain_db: 10.0,
+            ..default_config()
+        };
+        let mut proc = AgcProcessor::new(cfg);
+
+        // Feed very quiet audio for a long time.
+        let chunk_size = 160;
+        let near_silence_rms = db_to_linear(-60.0);
+        for _ in 0..200 {
+            let mut chunk = sine_wave(near_silence_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db <= 10.0 + 1e-3,
+            "Gain {:.2} dB exceeds max_gain_db=10.0",
+            gain_db
+        );
+    }
+
+    /// 2.10: All-zero input does not produce NaN, infinity, or excessive gain.
+    #[test]
+    fn agc_silence_does_not_explode() {
+        let sample_rate = 16000_u32;
+        let cfg = default_config();
+        let max_gain_db = cfg.max_gain_db;
+        let mut proc = AgcProcessor::new(cfg);
+
+        let chunk_size = 160;
+        for _ in 0..500 {
+            let mut chunk = vec![0.0f32; chunk_size];
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db.is_finite(),
+            "gain_db should be finite on silence, got {}",
+            gain_db
+        );
+        assert!(
+            gain_db <= max_gain_db + 1e-3,
+            "gain {:.2} dB exceeds max_gain_db={} on silence",
+            gain_db,
+            max_gain_db
+        );
+    }
+
+    /// Verify output RMS is within 3 dB of target after convergence.
+    #[test]
+    fn agc_output_level_near_target() {
+        let sample_rate = 16000_u32;
+        let target_db = -18.0_f32;
+        let input_rms = db_to_linear(-35.0); // Quiet input, 17 dB below target.
+        let cfg = default_config();
+        let mut proc = AgcProcessor::new(cfg);
+
+        let chunk_size = 160;
+        // Warm up for 2 s to allow release envelope to converge.
+        for _ in 0..200 {
+            let mut chunk = sine_wave(input_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        // Measure output RMS over the final 100 ms.
+        let mut output: Vec<f32> = sine_wave(input_rms, chunk_size * 10, sample_rate);
+        proc.process(&mut output, sample_rate);
+        let out_rms_db = 20.0 * rms(&output).log10();
+
+        assert!(
+            (out_rms_db - target_db).abs() < 3.0,
+            "Output RMS {:.1} dBFS not within 3 dB of target {:.1} dBFS",
+            out_rms_db,
+            target_db
+        );
     }
 }

@@ -14,10 +14,15 @@ use super::queue::{QueuedSegment, TranscriptionQueue};
 /// 48000 * 30 * 2 = 2,880,000 samples
 const RING_BUFFER_CAPACITY: usize = 48000 * 30 * 2;
 
-/// Maximum manual recording buffer duration: 30 minutes at 48kHz stereo.
-/// 48000 * 60 * 30 * 2 = 172,800,000 samples (~660 MB of f32).
+/// Maximum manual recording buffer duration: 30 minutes at 48kHz mono.
+/// 48000 * 60 * 30 = 86,400,000 samples (~330 MB of f32).
 /// Audio beyond this limit is silently dropped and a warning is emitted once.
-const MANUAL_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30 * 2;
+const MANUAL_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30;
+
+/// Maximum processed (mono) recording buffer duration: 30 minutes at 16kHz mono.
+/// 16000 * 60 * 30 = 28,800,000 samples (~110 MB of f32).
+/// Sized for the 16kHz mono signal that reaches the transcription engine.
+const PROCESSED_MAX_BUFFER_SAMPLES: usize = 48000 * 60 * 30;
 
 /// Overflow threshold: 90% of buffer capacity
 const OVERFLOW_THRESHOLD_PERCENT: usize = 90;
@@ -233,11 +238,33 @@ pub struct TranscribeState {
     ///
     /// In manual recording mode audio is appended here instead of relying on
     /// the ring buffer, so the full session is preserved without wraparound
-    /// loss. Capped at `MANUAL_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz stereo).
+    /// loss. Capped at `MANUAL_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz mono).
+    /// Contains **raw** (pre-gain, pre-AGC) mono PCM: the multi-channel
+    /// hardware input mixed down to mono but with no software processing
+    /// applied.  Used only for the raw WAV save.
     manual_audio_buffer: Vec<f32>,
     /// Set to true after the first time the manual buffer hits the 30-minute cap,
     /// so the overflow warning is emitted only once per session.
     manual_buffer_full_warned: bool,
+    /// Growable accumulator for gain/AGC-processed **mono** audio during a manual
+    /// recording session. Mirrors `manual_audio_buffer` but holds the signal after
+    /// all software processing stages (mic gain + AGC, channel mix-down to mono).
+    ///
+    /// This buffer is used for:
+    ///  1. The "processed" WAV file saved alongside each recording.
+    ///  2. The audio submitted to the transcription engine when the recording ends.
+    ///
+    /// Capped at `PROCESSED_MAX_BUFFER_SAMPLES` (30 minutes at 48kHz mono).
+    processed_audio_buffer: Vec<f32>,
+    /// Set to true after the first time the processed buffer hits the cap,
+    /// so the overflow warning is emitted only once per session.
+    processed_buffer_full_warned: bool,
+    /// When set, indicates this recording session is a playback reprocessing
+    /// of an existing recording. Holds the original file's stem (e.g.,
+    /// `"vtx-20260308-143022"`) so that the processed WAV overwrites the
+    /// original `-processed.wav` rather than creating a new timestamped file.
+    /// The raw WAV is left untouched during playback reprocessing.
+    playback_source_stem: Option<String>,
 }
 
 impl TranscribeState {
@@ -260,7 +287,26 @@ impl TranscribeState {
             manual_recording: false,
             manual_audio_buffer: Vec::new(),
             manual_buffer_full_warned: false,
+            processed_audio_buffer: Vec::new(),
+            processed_buffer_full_warned: false,
+            playback_source_stem: None,
         }
+    }
+
+    /// Set the playback source stem for reprocessing an existing recording.
+    ///
+    /// When set, `submit_recording` and `save_recording_wav` will overwrite
+    /// the existing `-processed.wav` for this stem instead of generating a
+    /// new timestamped file, and will skip writing a new raw WAV (the
+    /// original raw file is left untouched).
+    pub fn set_playback_source_stem(&mut self, stem: Option<String>) {
+        if let Some(ref s) = stem {
+            tracing::info!(
+                "[TranscribeState] Playback reprocessing mode: stem = {:?}",
+                s
+            );
+        }
+        self.playback_source_stem = stem;
     }
 
     /// Enable or disable manual recording mode.
@@ -282,28 +328,40 @@ impl TranscribeState {
         }
     }
 
-    /// Save the accumulated manual recording buffer to a WAV file and fire the
+    /// Save the accumulated manual recording buffers to WAV files and fire the
     /// `on_recording_saved` callback, but do **not** enqueue for transcription.
     ///
+    /// Saves two files sharing the same timestamp stem:
+    /// - `vtx-<timestamp>.wav` — raw (pre-gain, pre-AGC) multi-channel audio as
+    ///   received from the hardware backend.
+    /// - `vtx-<timestamp>-processed.wav` — gain/AGC-processed mono audio that
+    ///   matches what the transcription engine would receive.
+    ///
     /// Used in auto-transcription mode where the VAD has already handled
-    /// real-time segmentation.  The WAV is still saved so the session appears
+    /// real-time segmentation.  Both WAVs are saved so the session appears
     /// as the active document and can be reprocessed.
+    ///
+    /// When `playback_source_stem` is set (playback reprocessing), the original
+    /// raw WAV is left untouched and only the `-processed.wav` is overwritten
+    /// using the original stem.
     pub fn save_recording_wav(&mut self) {
-        let samples: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
+        let raw_samples: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
         self.manual_buffer_full_warned = false;
+        let processed_samples: Vec<f32> = std::mem::take(&mut self.processed_audio_buffer);
+        self.processed_buffer_full_warned = false;
 
-        if samples.is_empty() {
+        if raw_samples.is_empty() {
             tracing::debug!("[TranscribeState] save_recording_wav: no audio accumulated");
             return;
         }
 
         tracing::info!(
-            "[TranscribeState] save_recording_wav: saving {} samples ({:.1}s)",
-            samples.len(),
-            samples.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
+            "[TranscribeState] save_recording_wav: saving {} raw samples ({:.1}s)",
+            raw_samples.len(),
+            raw_samples.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
         );
 
-        let filename = generate_recording_filename();
+        let is_playback_reprocess = self.playback_source_stem.is_some();
         let recordings_dir = crate::audio::recordings_dir();
         if let Err(e) = std::fs::create_dir_all(&recordings_dir) {
             tracing::error!(
@@ -313,29 +371,80 @@ impl TranscribeState {
             return;
         }
 
-        let output_path = recordings_dir.join(&filename);
-        match save_to_wav(&samples, self.sample_rate, self.channels, &output_path) {
-            Ok(()) => {
-                tracing::info!(
-                    "[TranscribeState] Saved recording WAV to: {:?}",
-                    output_path
-                );
-                if let Some(ref cb) = self.callback {
-                    cb.on_recording_saved(output_path.to_string_lossy().to_string());
+        // Reuse the original stem during playback reprocessing; otherwise
+        // generate a fresh timestamp.
+        let stem = self
+            .playback_source_stem
+            .clone()
+            .unwrap_or_else(crate::audio::generate_recording_stem);
+
+        // --- Raw WAV (mono, pre-gain) ---
+        // Skip during playback reprocessing to preserve the original recording.
+        let raw_path = recordings_dir.join(format!("{}.wav", stem));
+        if !is_playback_reprocess {
+            match save_to_wav(&raw_samples, self.sample_rate, 1, &raw_path) {
+                Ok(()) => {
+                    tracing::info!(
+                        "[TranscribeState] Saved raw recording WAV to: {:?}",
+                        raw_path
+                    );
+                    // Raw WAV is saved silently — do not update last_recording_path yet.
+                    // If no processed WAV follows, fire the callback with the raw path as fallback.
+                }
+                Err(e) => {
+                    tracing::error!("[TranscribeState] Failed to save raw recording WAV: {}", e);
                 }
             }
-            Err(e) => {
-                tracing::error!("[TranscribeState] Failed to save recording WAV: {}", e);
+        } else {
+            tracing::info!(
+                "[TranscribeState] Playback reprocessing — skipping raw WAV write for {:?}",
+                raw_path
+            );
+        }
+
+        // --- Processed WAV ---
+        // Fire on_recording_saved with the processed path so the demo opens the
+        // gain/AGC-adjusted mono file (what the transcription engine sees).
+        // If processed samples are absent (e.g. AGC/gain never enabled) fall back
+        // to the raw path so the callback always fires exactly once per session.
+        if !processed_samples.is_empty() {
+            let proc_filename = format!("{}-processed.wav", stem);
+            let proc_path = recordings_dir.join(&proc_filename);
+            match save_to_wav(&processed_samples, self.sample_rate, 1, &proc_path) {
+                Ok(()) => {
+                    tracing::info!(
+                        "[TranscribeState] Saved processed recording WAV to: {:?}",
+                        proc_path
+                    );
+                    if let Some(ref cb) = self.callback {
+                        cb.on_recording_saved(proc_path.to_string_lossy().to_string());
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "[TranscribeState] Failed to save processed recording WAV: {}",
+                        e
+                    );
+                    // Fall back to raw path so the session document is still set.
+                    if let Some(ref cb) = self.callback {
+                        cb.on_recording_saved(raw_path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        } else {
+            // No processed audio accumulated — fire callback with raw path.
+            if let Some(ref cb) = self.callback {
+                cb.on_recording_saved(raw_path.to_string_lossy().to_string());
             }
         }
     }
 
     /// Submit the entire accumulated manual recording audio for transcription.
     ///
-    /// Drains the `manual_audio_buffer` (the growable Vec accumulated during
-    /// the manual recording session) and queues it for transcription. The ring
-    /// buffer is not consulted here — all manual recording audio lives in
-    /// `manual_audio_buffer`.
+    /// Saves the raw audio to a WAV file, saves the processed (gain/AGC-applied
+    /// mono) audio to a second WAV file, and enqueues the **processed** audio for
+    /// transcription. The ring buffer is not consulted here — all manual recording
+    /// audio lives in the manual buffers.
     ///
     /// Intended for use at the end of a manual recording session (e.g., when
     /// the app calls `stop_recording()`).
@@ -344,21 +453,82 @@ impl TranscribeState {
             return;
         }
 
-        // Take ownership of the accumulated audio and reset the buffer so the
-        // struct is immediately ready for the next session.
-        let segment: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
+        // Drain both buffers atomically so the struct is immediately ready for
+        // the next session.
+        let raw_segment: Vec<f32> = std::mem::take(&mut self.manual_audio_buffer);
         self.manual_buffer_full_warned = false;
+        let processed_segment: Vec<f32> = std::mem::take(&mut self.processed_audio_buffer);
+        self.processed_buffer_full_warned = false;
 
-        if segment.is_empty() {
+        // Determine which buffer to submit for transcription.
+        // Prefer processed (gain/AGC-applied mono); fall back to raw if processed
+        // is empty (e.g., AGC was never enabled and no gain was applied but the
+        // buffer wasn't populated — defensive).
+        let (transcription_segment, transcription_channels) = if !processed_segment.is_empty() {
+            (processed_segment.clone(), 1u16)
+        } else if !raw_segment.is_empty() {
+            tracing::warn!(
+                "[TranscribeState] submit_recording: processed buffer is empty, \
+                 falling back to raw audio for transcription"
+            );
+            (raw_segment.clone(), self.channels)
+        } else {
             tracing::debug!("[TranscribeState] submit_recording: no audio accumulated");
             return;
-        }
+        };
 
         tracing::info!(
-            "[TranscribeState] submit_recording: submitting {} samples ({:.1}s) from manual buffer",
-            segment.len(),
-            segment.len() as f64 / (self.sample_rate as f64 * self.channels as f64),
+            "[TranscribeState] submit_recording: submitting {} processed samples ({:.1}s)",
+            transcription_segment.len(),
+            transcription_segment.len() as f64 / self.sample_rate as f64,
         );
+
+        // Save WAV files. When reprocessing a playback (playback_source_stem is
+        // set), reuse the original stem and only overwrite the processed WAV —
+        // the raw recording is left untouched. For fresh recordings, save both
+        // raw and processed WAVs with a new timestamp.
+        let mut proc_wav_path: Option<std::path::PathBuf> = None;
+        let is_playback_reprocess = self.playback_source_stem.is_some();
+        let recordings_dir = crate::audio::recordings_dir();
+        if let Ok(()) = std::fs::create_dir_all(&recordings_dir) {
+            let stem = self
+                .playback_source_stem
+                .clone()
+                .unwrap_or_else(crate::audio::generate_recording_stem);
+
+            // Raw WAV (mono, pre-gain) — skip during playback reprocessing
+            // to preserve the original untouched raw recording.
+            if !is_playback_reprocess && !raw_segment.is_empty() {
+                let raw_path = recordings_dir.join(format!("{}.wav", stem));
+                match save_to_wav(&raw_segment, self.sample_rate, 1, &raw_path) {
+                    Ok(()) => {
+                        tracing::info!("[TranscribeState] Saved raw WAV: {:?}", raw_path);
+                    }
+                    Err(e) => {
+                        tracing::error!("[TranscribeState] Failed to save raw WAV: {}", e);
+                    }
+                }
+            }
+
+            // Processed WAV (overwrites existing -processed.wav during playback)
+            if !processed_segment.is_empty() {
+                let proc_path = recordings_dir.join(format!("{}-processed.wav", stem));
+                match save_to_wav(&processed_segment, self.sample_rate, 1, &proc_path) {
+                    Ok(()) => {
+                        tracing::info!("[TranscribeState] Saved processed WAV: {:?}", proc_path);
+                        proc_wav_path = Some(proc_path.clone());
+                        if let Some(ref cb) = self.callback {
+                            cb.on_recording_saved(proc_path.to_string_lossy().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[TranscribeState] Failed to save processed WAV: {}", e);
+                    }
+                }
+            }
+        } else {
+            tracing::error!("[TranscribeState] Failed to create recordings directory");
+        }
 
         // Reset session state
         self.in_speech = false;
@@ -367,7 +537,16 @@ impl TranscribeState {
         self.lookback_sample_count = 0;
         self.segment_start_idx = self.ring_buffer.write_position();
 
-        self.queue_segment(segment);
+        // Enqueue the processed segment for transcription, reusing the
+        // already-saved processed WAV path.  Using enqueue_for_transcription
+        // (not queue_segment_with_channels) avoids writing a third WAV file
+        // whose `vtx-{timestamp}.wav` name would collide with and overwrite
+        // the raw recording.
+        self.enqueue_for_transcription(
+            transcription_segment,
+            transcription_channels,
+            proc_wav_path,
+        );
     }
 
     /// Set the callback for state events.
@@ -394,6 +573,8 @@ impl TranscribeState {
         self.vad_offset_base_ms = 0;
         self.manual_audio_buffer.clear();
         self.manual_buffer_full_warned = false;
+        self.processed_audio_buffer.clear();
+        self.processed_buffer_full_warned = false;
     }
 
     /// Activate transcribe mode
@@ -446,6 +627,44 @@ impl TranscribeState {
                  buffer limit. Further audio will be discarded."
             );
             self.manual_buffer_full_warned = true;
+        }
+    }
+
+    /// Append gain/AGC-processed **mono** audio to the processed recording buffer.
+    ///
+    /// This mirrors `write_manual_buffer` but operates on the post-processing
+    /// signal (after `mic_gain_db` and AGC have been applied, and channels have
+    /// been mixed down to mono). The processed buffer is used for:
+    ///  1. The `*-processed.wav` file written at the end of a recording session.
+    ///  2. The audio submitted to the Whisper transcription engine in PTT mode.
+    ///
+    /// Audio beyond the `PROCESSED_MAX_BUFFER_SAMPLES` cap is silently dropped
+    /// (one warning emitted per session).
+    pub fn write_processed_buffer(&mut self, mono_samples: &[f32]) {
+        let remaining_capacity =
+            PROCESSED_MAX_BUFFER_SAMPLES.saturating_sub(self.processed_audio_buffer.len());
+
+        if remaining_capacity == 0 {
+            if !self.processed_buffer_full_warned {
+                tracing::warn!(
+                    "[TranscribeState] Processed recording buffer has reached the 30-minute \
+                     maximum. Further processed audio will be discarded."
+                );
+                self.processed_buffer_full_warned = true;
+            }
+            return;
+        }
+
+        let samples_to_write = mono_samples.len().min(remaining_capacity);
+        self.processed_audio_buffer
+            .extend_from_slice(&mono_samples[..samples_to_write]);
+
+        if samples_to_write < mono_samples.len() && !self.processed_buffer_full_warned {
+            tracing::warn!(
+                "[TranscribeState] Processed recording buffer has reached the 30-minute \
+                 maximum. Further processed audio will be discarded."
+            );
+            self.processed_buffer_full_warned = true;
         }
     }
 
@@ -516,9 +735,10 @@ impl TranscribeState {
             }
         }
 
-        // If we extracted a segment due to overflow, queue it
+        // If we extracted a segment due to overflow, queue it.
+        // Ring buffer now contains mono processed audio (channels=1).
         if let Some(segment) = overflow_segment.clone() {
-            self.queue_segment(segment);
+            self.queue_segment_with_channels(segment, 1);
         }
 
         overflow_segment
@@ -579,8 +799,9 @@ impl TranscribeState {
             segment.len()
         );
 
-        // Queue the segment for transcription (will validate before actually queueing)
-        self.queue_segment(segment.clone());
+        // Queue the segment for transcription (will validate before actually queueing).
+        // Ring buffer contains mono processed audio (channels=1).
+        self.queue_segment_with_channels(segment.clone(), 1);
 
         Some(segment)
     }
@@ -701,8 +922,9 @@ impl TranscribeState {
             extraction_point_ms
         );
 
-        // Queue the segment for transcription (will validate before actually queueing)
-        self.queue_segment(segment.clone());
+        // Queue the segment for transcription (will validate before actually queueing).
+        // Ring buffer contains mono processed audio (channels=1).
+        self.queue_segment_with_channels(segment.clone(), 1);
 
         // Update state for next segment - the new segment starts at the extraction point
         // No lookback for continuation segments (we already have the audio in the buffer)
@@ -750,8 +972,9 @@ impl TranscribeState {
             self.segment_sample_count
         );
 
-        // Queue the segment for transcription (will validate before actually queueing)
-        self.queue_segment(segment.clone());
+        // Queue the segment for transcription (will validate before actually queueing).
+        // Ring buffer contains mono processed audio (channels=1).
+        self.queue_segment_with_channels(segment.clone(), 1);
 
         // Update state for next segment - remain in speech
         self.segment_start_idx = self.ring_buffer.write_position();
@@ -764,14 +987,20 @@ impl TranscribeState {
 
     /// Check if a segment has sufficient audio content for transcription
     /// Returns false if segment is too short or too quiet (likely to produce [BLANK_AUDIO])
+    #[allow(dead_code)]
     fn is_segment_valid_for_transcription(&self, samples: &[f32]) -> bool {
+        self.is_segment_valid_for_transcription_ch(samples, self.channels)
+    }
+
+    /// Check if a segment has sufficient audio content for transcription with an explicit channel count.
+    fn is_segment_valid_for_transcription_ch(&self, samples: &[f32], channels: u16) -> bool {
         if samples.is_empty() {
             return false;
         }
 
-        // Check minimum duration
-        // samples.len() is raw sample count (stereo), divide by channels to get frames
-        let frames = samples.len() as u64 / self.channels as u64;
+        // Check minimum duration.
+        // samples.len() is the total sample count; divide by channels to get frames.
+        let frames = samples.len() as u64 / channels as u64;
         let duration_ms = frames * 1000 / self.sample_rate as u64;
         if duration_ms < MIN_SEGMENT_DURATION_MS {
             tracing::debug!(
@@ -798,14 +1027,27 @@ impl TranscribeState {
         true
     }
 
-    /// Queue a segment for transcription (saves WAV and enqueues)
+    /// Queue a segment for transcription using `self.channels` (raw/hardware channel count).
+    #[allow(dead_code)]
     fn queue_segment(&self, samples: Vec<f32>) {
+        self.queue_segment_with_channels(samples, self.channels);
+    }
+
+    /// Queue a segment for transcription with an explicit channel count.
+    ///
+    /// Saves the segment to a new WAV file (using a timestamped filename) and
+    /// enqueues it for transcription.
+    ///
+    /// Use this when the samples have already been mixed down to a different
+    /// channel count than `self.channels` (e.g., mono processed audio with
+    /// `channels = 1` when the hardware backend uses stereo).
+    fn queue_segment_with_channels(&self, samples: Vec<f32>, channels: u16) {
         if samples.is_empty() {
             return;
         }
 
-        // Validate segment has sufficient content
-        if !self.is_segment_valid_for_transcription(&samples) {
+        // Validate segment has sufficient content using the correct channel count.
+        if !self.is_segment_valid_for_transcription_ch(&samples, channels) {
             return;
         }
 
@@ -822,12 +1064,14 @@ impl TranscribeState {
         }
 
         let output_path = recordings_dir.join(&filename);
-        let wav_path = match save_to_wav(&samples, self.sample_rate, self.channels, &output_path) {
+        let wav_path = match save_to_wav(&samples, self.sample_rate, channels, &output_path) {
             Ok(()) => {
                 tracing::info!("[TranscribeState] Saved segment to: {:?}", output_path);
-                if let Some(ref cb) = self.callback {
-                    cb.on_recording_saved(output_path.to_string_lossy().to_string());
-                }
+                // Intentionally do NOT fire on_recording_saved here. Segment WAVs are
+                // transcription-pipeline implementation details; firing the callback would
+                // overwrite last_recording_path and cause the demo to open a segment file
+                // instead of the session-level WAV (raw or processed) saved by
+                // save_recording_wav / submit_recording.
                 Some(output_path)
             }
             Err(e) => {
@@ -836,11 +1080,34 @@ impl TranscribeState {
             }
         };
 
+        self.enqueue_for_transcription(samples, channels, wav_path);
+    }
+
+    /// Enqueue a segment for transcription with an already-saved WAV path.
+    ///
+    /// Unlike [`queue_segment_with_channels`], this does **not** save a WAV
+    /// file.  Use this when the caller has already persisted the audio (e.g.,
+    /// [`submit_recording`] saves its own raw + processed pair and should not
+    /// have a third WAV overwrite the raw file).
+    fn enqueue_for_transcription(
+        &self,
+        samples: Vec<f32>,
+        channels: u16,
+        wav_path: Option<std::path::PathBuf>,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+
+        if !self.is_segment_valid_for_transcription_ch(&samples, channels) {
+            return;
+        }
+
         // Create queued segment
         let queued = QueuedSegment {
             samples,
             sample_rate: self.sample_rate,
-            channels: self.channels,
+            channels,
             wav_path,
         };
 

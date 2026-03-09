@@ -738,4 +738,8 @@ pub enum EngineEvent {
     },
     /// File playback through the engine pipeline has completed (or was cancelled).
     PlaybackComplete,
+    /// Current AGC gain changed (emitted at most every 100 ms when AGC is enabled).
+    ///
+    /// The `f32` value is the instantaneous AGC gain in dB at the time of emission.
+    AgcGainChanged(f32),
 }

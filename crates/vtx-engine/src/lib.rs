@@ -142,6 +142,86 @@ pub struct EngineConfig {
     /// Recommended range: -20.0 to +20.0 dB.
     #[serde(default = "default_mic_gain_db")]
     pub mic_gain_db: f32,
+
+    /// Automatic Gain Control configuration (default: disabled).
+    ///
+    /// When enabled, an RMS envelope-follower algorithm continuously adjusts
+    /// the gain to maintain a target output level. Operates after `mic_gain_db`.
+    #[serde(default)]
+    pub agc: AgcConfig,
+}
+
+// =============================================================================
+// AgcConfig
+// =============================================================================
+
+/// Configuration for the Automatic Gain Control (AGC) stage.
+///
+/// AGC uses a feed-back RMS envelope follower with separate attack and release
+/// time constants to maintain a consistent output level regardless of
+/// microphone sensitivity or input level variation.
+///
+/// The AGC stage is inserted after the `mic_gain_db` manual gain stage and
+/// before the VAD and visualization stages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgcConfig {
+    /// Whether AGC is active (default `false`).
+    ///
+    /// When `false`, the AGC stage is bypassed entirely with no processing cost.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Target RMS output level in dBFS (default -18.0).
+    ///
+    /// The AGC attempts to keep the RMS of processed audio near this level.
+    /// Recommended range: -30.0 to -6.0 dBFS.
+    #[serde(default = "default_agc_target_level_db")]
+    pub target_level_db: f32,
+
+    /// Gain reduction time constant in milliseconds (default 10.0).
+    ///
+    /// Controls how quickly the AGC reduces gain when the input gets louder.
+    /// Shorter values respond faster but may cause audible pumping on transients.
+    #[serde(default = "default_agc_attack_time_ms")]
+    pub attack_time_ms: f32,
+
+    /// Gain increase time constant in milliseconds (default 200.0).
+    ///
+    /// Controls how quickly the AGC increases gain when the input gets quieter.
+    /// Longer values prevent the AGC from amplifying noise between words.
+    #[serde(default = "default_agc_release_time_ms")]
+    pub release_time_ms: f32,
+
+    /// Minimum allowable AGC gain in dB (default -6.0).
+    ///
+    /// Prevents the AGC from attenuating the signal excessively.
+    #[serde(default = "default_agc_min_gain_db")]
+    pub min_gain_db: f32,
+
+    /// Maximum allowable AGC gain in dB (default 30.0).
+    ///
+    /// Caps the AGC gain to prevent extreme amplification of quiet/silent input.
+    #[serde(default = "default_agc_max_gain_db")]
+    pub max_gain_db: f32,
+}
+
+fn default_agc_target_level_db() -> f32 { -18.0 }
+fn default_agc_attack_time_ms() -> f32 { 10.0 }
+fn default_agc_release_time_ms() -> f32 { 200.0 }
+fn default_agc_min_gain_db() -> f32 { -6.0 }
+fn default_agc_max_gain_db() -> f32 { 30.0 }
+
+impl Default for AgcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_level_db: default_agc_target_level_db(),
+            attack_time_ms: default_agc_attack_time_ms(),
+            release_time_ms: default_agc_release_time_ms(),
+            min_gain_db: default_agc_min_gain_db(),
+            max_gain_db: default_agc_max_gain_db(),
+        }
+    }
 }
 
 fn default_vad_voiced_threshold_db() -> f32 { -42.0 }
@@ -174,6 +254,7 @@ impl Default for EngineConfig {
             viz_frame_interval_ms: default_viz_frame_interval_ms(),
             word_break_segmentation_enabled: default_word_break_segmentation_enabled(),
             mic_gain_db: default_mic_gain_db(),
+            agc: AgcConfig::default(),
         }
     }
 }
@@ -270,6 +351,11 @@ pub struct AudioEngine {
     /// must manually start/stop recordings. When `false` (auto-transcription
     /// mode), VAD drives segmentation automatically.
     ptt_mode: Arc<AtomicBool>,
+    /// AGC configuration shared with the capture thread.
+    ///
+    /// The capture thread reads this via `try_lock` once per chunk.
+    /// The public API writes it via `set_agc_config`.
+    agc_config: Arc<std::sync::Mutex<AgcConfig>>,
 }
 
 impl AudioEngine {
@@ -463,6 +549,15 @@ impl AudioEngine {
 
         self.playback_active.store(true, Ordering::SeqCst);
 
+        // Extract the original recording stem from the source file so that
+        // playback reprocessing overwrites the existing processed WAV instead
+        // of creating a new timestamped file.
+        let source_stem = crate::audio::extract_recording_stem(path.as_ref());
+        {
+            let mut ts = self.transcribe_state.lock().unwrap();
+            ts.set_playback_source_stem(source_stem);
+        }
+
         // In PTT mode, start a manual recording session so the whole file is
         // submitted as one segment when playback ends.
         if ptt_mode {
@@ -510,9 +605,15 @@ impl AudioEngine {
                 if let Ok(mut ts) = transcribe_state_arc.lock() {
                     ts.submit_recording();
                     ts.set_manual_recording(false);
+                    ts.set_playback_source_stem(None);
                 }
                 let duration_ms = 0u64; // duration tracking not needed for playback PTT
                 let _ = sender.send(EngineEvent::RecordingStopped { duration_ms });
+            } else {
+                // Non-PTT path: clear the playback source stem when playback ends.
+                if let Ok(mut ts) = transcribe_state_arc.lock() {
+                    ts.set_playback_source_stem(None);
+                }
             }
 
             let _ = sender.send(EngineEvent::PlaybackComplete);
@@ -629,6 +730,7 @@ impl AudioEngine {
         let ptt_mode = self.ptt_mode.clone();
         let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
         let mic_gain_db_atomic = self.mic_gain_db.clone();
+        let agc_config_shared = self.agc_config.clone();
 
         loop_active.store(true, Ordering::SeqCst);
 
@@ -639,6 +741,13 @@ impl AudioEngine {
             let mut viz_processor = processor::VisualizationProcessor::new(sample_rate, 256);
             let mut pending_state_change = processor::SpeechStateChange::None;
             let mut pending_word_break: Option<processor::WordBreakEvent> = None;
+
+            // Initialise AGC processor from the current config snapshot.
+            let initial_agc_config = agc_config_shared
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let mut agc_processor = processor::AgcProcessor::new(initial_agc_config);
 
             loop {
                 if !loop_active.load(Ordering::SeqCst) || shutdown_flag.load(Ordering::SeqCst) {
@@ -651,20 +760,38 @@ impl AudioEngine {
                     .or_else(|| inject_rx.try_recv().ok());
 
                 if let Some(data) = audio_data {
-                    let mut mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+                    // Mix down to mono.  This copy is kept unmodified as the
+                    // "raw" mono snapshot used for the raw WAV accumulation buffer.
+                    let raw_mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+
+                    // `processed_samples` starts as a copy of `raw_mono_samples` and is
+                    // then mutated in-place by every processing stage.  It is kept
+                    // entirely separate from `raw_mono_samples` so there is no risk of
+                    // accidentally writing the wrong data to the wrong WAV file.
+                    let mut processed_samples = raw_mono_samples.clone();
 
                     // --- Software mic gain ---
                     let gain_db = f32::from_bits(mic_gain_db_atomic.load(Ordering::Relaxed));
                     if gain_db != 0.0 {
                         let linear = 10f32.powf(gain_db / 20.0);
-                        for s in mono_samples.iter_mut() {
+                        for s in processed_samples.iter_mut() {
                             *s = (*s * linear).clamp(-1.0, 1.0);
                         }
                     }
 
+                    // --- Automatic Gain Control ---
+                    // try_lock: if the UI thread is mid-update, skip this chunk's hot-swap
+                    // (the previous config remains active — safe, transient).
+                    if let Ok(new_cfg) = agc_config_shared.try_lock() {
+                        agc_processor.update_config(new_cfg.clone());
+                    }
+                    if let Some(agc_gain_db) = agc_processor.process(&mut processed_samples, sample_rate) {
+                        let _ = sender.send(EngineEvent::AgcGainChanged(agc_gain_db));
+                    }
+
                     // --- VAD ---
                     if vad_enabled {
-                        speech_detector.process(&mono_samples);
+                        speech_detector.process(&processed_samples);
                     }
                     let speech_metrics = if vad_enabled {
                         Some(speech_detector.get_metrics())
@@ -677,7 +804,7 @@ impl AudioEngine {
                         if let Some(ref metrics) = speech_metrics {
                             viz_processor.set_speech_metrics(metrics.clone());
                         }
-                        if let Some(viz) = viz_processor.process(&mono_samples) {
+                        if let Some(viz) = viz_processor.process(&processed_samples) {
                             let _ = sender.send(EngineEvent::VisualizationData(viz));
                         }
                     }
@@ -700,9 +827,10 @@ impl AudioEngine {
 
                     if let Ok(mut ts) = transcribe_state.try_lock() {
                         if is_recording {
-                            // Always accumulate raw audio into the manual buffer so the
-                            // session can be saved as a WAV and reprocessed later.
-                            ts.write_manual_buffer(&data.samples);
+                            // Pre-gain mono mix → raw WAV accumulation.
+                            ts.write_manual_buffer(&raw_mono_samples);
+                            // Gain/AGC-processed mono → processed WAV + transcription.
+                            ts.write_processed_buffer(&processed_samples);
                         } else {
                             // Not recording: let the global transcription_enabled flag
                             // control whether VAD mode is active.
@@ -723,7 +851,10 @@ impl AudioEngine {
                                 let _ = sender.send(EngineEvent::SpeechStarted);
                             }
 
-                            ts.process_samples(&data.samples);
+                            // Feed the ring buffer with processed mono samples so that
+                            // VAD-driven segment extraction and transcription use the
+                            // gain/AGC-adjusted signal.
+                            ts.process_samples(&processed_samples);
 
                             if let processor::SpeechStateChange::Ended { duration_ms } =
                                 pending_state_change
@@ -796,6 +927,21 @@ impl AudioEngine {
         f32::from_bits(self.mic_gain_db.load(Ordering::Relaxed))
     }
 
+    /// Replace the active AGC configuration.
+    ///
+    /// Takes effect on the next audio chunk processed in the capture loop
+    /// (at most one chunk duration, typically ~10–40 ms).
+    pub fn set_agc_config(&self, config: AgcConfig) {
+        if let Ok(mut guard) = self.agc_config.lock() {
+            *guard = config;
+        }
+    }
+
+    /// Get the current AGC configuration.
+    pub fn agc_config(&self) -> AgcConfig {
+        self.agc_config.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
     /// Get the current engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
@@ -804,12 +950,13 @@ impl AudioEngine {
     /// Update the engine configuration.
     ///
     /// The new configuration takes effect on the next `start_capture` call,
-    /// except for `mic_gain_db` which is applied immediately via
-    /// [`set_mic_gain`](Self::set_mic_gain).
+    /// except for `mic_gain_db` and `agc` which are applied immediately.
     pub fn set_config(&mut self, config: EngineConfig) {
         let gain = config.mic_gain_db;
+        let agc = config.agc.clone();
         self.config = config;
         self.set_mic_gain(gain);
+        self.set_agc_config(agc);
     }
 
     /// Check if the Whisper model is available.

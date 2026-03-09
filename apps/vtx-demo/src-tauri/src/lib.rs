@@ -288,6 +288,9 @@ pub fn run() {
                                 EngineEvent::PlaybackComplete => {
                                     let _ = ah.emit("playback-complete", ());
                                 }
+                                EngineEvent::AgcGainChanged(gain_db) => {
+                                    let _ = ah.emit("agc-gain-changed", gain_db);
+                                }
                             }
                         }).spawn();
 
