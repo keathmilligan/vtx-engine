@@ -10,26 +10,18 @@ Provides platform-native audio capture, real-time speech detection, audio visual
 
 ### Rust engine (`vtx-engine`)
 
-- **Audio capture** — WASAPI (Windows), CoreAudio + ScreenCaptureKit (macOS), PipeWire (Linux)
-- **Echo cancellation** — AEC3-based echo cancellation on all platforms; activates automatically when a second audio source (system audio) is added
-- **Speech detection** — Dual-mode VAD (voiced + whisper/soft speech) with signal-feature analysis (RMS, ZCR, spectral centroid), transient rejection, 200ms lookback, and word-break detection
-- **Visualization** — Real-time waveform downsampling, 512-point FFT spectrogram with log-frequency mapping and color gradient LUT, per-frame speech activity metrics
-- **Live transcription** — Whisper.cpp loaded at runtime via dynamic FFI; VAD-driven segmentation with hallucination mitigation (entropy/logprob thresholds, repetition-loop removal)
-- **Manual recording** — `start_recording()` / `stop_recording()` for long-form capture (up to 30 minutes); VAD segmentation is suspended while recording
-- **File playback** — `play_file()` routes a WAV file through the full engine pipeline (visualization + VAD + transcription), with optional PTT-mode for whole-file single-segment submission
-- **Stream transcription** — `transcribe_audio_stream`: accepts a channel of 16 kHz mono f32 PCM frames, runs single-pass Whisper inference when the channel closes, returns `Vec<TranscriptionSegment>`
-- **File transcription** — `transcribe_audio_file`: loads a WAV file, resamples to 16 kHz mono, returns `Vec<TranscriptionSegment>`
-- **Model management** — `ModelManager`: typed `WhisperModel` enum covering all 9 ggml variants, platform-aware cache directory, async download with progress callback
-- **GPU acceleration** — CUDA (Windows, auto-detected), Metal (macOS, always enabled via xcframework)
-- **Config persistence** — `EngineConfig::load()` / `EngineConfig::save()` as TOML in the platform-standard config directory
-- **Transcription history** — `TranscriptionHistory`: bounded NDJSON-backed history store with WAV TTL cleanup
+- **Platform-native audio capture** — WASAPI, CoreAudio/ScreenCaptureKit, PipeWire
+- **Audio processing** — Echo cancellation (AEC3), automatic gain control, and real-time speech detection with dual-mode VAD
+- **Live transcription** — Whisper.cpp via dynamic FFI with VAD-driven segmentation and hallucination mitigation
+- **GPU acceleration** — CUDA on Windows, Metal on macOS
+- **Flexible input** — Live microphone capture, manual recording (up to 30 min), file playback, and raw audio stream transcription
+- **Visualization data** — Waveform, FFT spectrogram, and per-frame speech activity metrics
+- **Model management** — Async download of all Whisper ggml model variants with progress callbacks
+- **Config & history** — TOML-based config persistence and bounded transcription history with WAV cleanup
 
 ### TypeScript visualization (`@vtx-engine/viz`)
 
-- **Waveform renderer** — real-time scrolling waveform
-- **Spectrogram renderer** — 512-point FFT with log-frequency mapping and color gradient LUT
-- **Mini-waveform renderer** — compact waveform thumbnail
-- **Speech activity renderer** — scrollable history canvas showing amplitude, ZCR, spectral centroid, VAD state (confirmed speech, lookback, word-break, onset markers), and segment submission markers; supports mouse-wheel and drag-to-scroll with a live/history indicator overlay; accumulates up to ~30 minutes of history (configurable)
+- **Canvas renderers** — Real-time waveform, spectrogram, mini-waveform thumbnail, and scrollable speech activity history
 
 ## Adding to Your Project
 
