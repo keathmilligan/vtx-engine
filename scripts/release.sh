@@ -90,7 +90,14 @@ fi
 
 echo "Updating Cargo.toml..."
 # Replace the first occurrence of  version = "X.Y.Z"  (the workspace version line)
-sed -i '' "0,/^version = \"${CURRENT_VERSION}\"/s//version = \"${NEW_VERSION}\"/" "$CARGO_TOML"
+python3 -c "
+import re, sys
+text = open(sys.argv[1]).read()
+new_text, n = re.subn(r'^version = \"' + re.escape(sys.argv[2]) + r'\"', 'version = \"' + sys.argv[3] + '\"', text, count=1, flags=re.MULTILINE)
+if n == 0:
+    sys.exit(1)
+open(sys.argv[1], 'w').write(new_text)
+" "$CARGO_TOML" "$CURRENT_VERSION" "$NEW_VERSION"
 
 # Verify the replacement took
 UPDATED_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/')
