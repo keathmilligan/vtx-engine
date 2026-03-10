@@ -90,7 +90,7 @@ fi
 
 echo "Updating Cargo.toml..."
 # Replace the first occurrence of  version = "X.Y.Z"  (the workspace version line)
-sed -i "0,/^version = \"${CURRENT_VERSION}\"/s//version = \"${NEW_VERSION}\"/" "$CARGO_TOML"
+sed -i '' "0,/^version = \"${CURRENT_VERSION}\"/s//version = \"${NEW_VERSION}\"/" "$CARGO_TOML"
 
 # Verify the replacement took
 UPDATED_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/')
