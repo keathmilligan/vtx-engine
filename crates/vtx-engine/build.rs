@@ -112,21 +112,39 @@ fn main() {
         for lib_name in &lib_names {
             let dest_path = stable_cache_dir.join(lib_name);
 
-            // Search for the file in the archive (may be in a subdirectory)
+            // Search for the file in the archive (may be in a subdirectory).
+            //
+            // The macOS xcframework zip ships the dylib inside a .framework bundle
+            // at a path like:
+            //   build-apple/whisper.xcframework/macos-arm64_x86_64/
+            //     whisper.framework/Versions/A/whisper
+            //
+            // That entry has no .dylib extension, so we also match it explicitly
+            // and save it as `libwhisper.dylib`.
             let mut found = false;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).expect("Failed to read zip entry");
                 let name = file.name().to_string();
 
-                if name.ends_with(lib_name) && !name.contains("__MACOSX") {
+                // Match either:
+                //   - a zip entry whose name ends with the target lib name, OR
+                //   - the macOS framework binary (no extension) inside the macos slice
+                let is_match = (!name.contains("__MACOSX"))
+                    && (name.ends_with(lib_name)
+                        || (lib_name == &"libwhisper.dylib"
+                            && name.contains("macos")
+                            && name.ends_with("/whisper.framework/Versions/A/whisper")));
+
+                if is_match {
                     let mut dest = fs::File::create(&dest_path)
                         .unwrap_or_else(|e| panic!("Failed to create {}: {}", lib_name, e));
                     io::copy(&mut file, &mut dest)
                         .unwrap_or_else(|e| panic!("Failed to extract {}: {}", lib_name, e));
                     found = true;
                     println!(
-                        "cargo:warning=Extracted {} ({} bytes)",
+                        "cargo:warning=Extracted {} from {} ({} bytes)",
                         lib_name,
+                        name,
                         dest_path.metadata().map(|m| m.len()).unwrap_or(0)
                     );
                     break;
