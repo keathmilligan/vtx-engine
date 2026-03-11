@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const WHISPER_VERSION: &str = "1.8.2";
 const GITHUB_RELEASE_BASE: &str = "https://github.com/ggml-org/whisper.cpp/releases/download";
@@ -330,6 +331,7 @@ fn copy_if_changed(src: &Path, dest: &Path, label: &str) {
 fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let response = reqwest::blocking::Client::builder()
         .user_agent("vtx-engine-build")
+        .timeout(Duration::from_secs(300)) // 5 minute timeout for large files
         .build()?
         .get(url)
         .send()?;
