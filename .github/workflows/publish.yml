@@ -15,6 +15,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache whisper.cpp dependencies
+        uses: actions/cache@v4
+        with:
+          path: target/whisper-cache
+          key: whisper-1.8.2-${{ runner.os }}-${{ hashFiles('**/build.rs') }}
+          restore-keys: |
+            whisper-1.8.2-${{ runner.os }}-
+
       - name: Install Linux audio dependencies
         run: |
           sudo apt-get update
