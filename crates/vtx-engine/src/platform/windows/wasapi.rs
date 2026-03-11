@@ -17,9 +17,10 @@ use aec3::voip::VoipAec3;
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
-    eCapture, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceCollection,
-    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
@@ -89,6 +90,10 @@ pub struct WasapiBackend {
     aec_enabled: Arc<Mutex<bool>>,
     /// Recording mode (shared with mixer)
     recording_mode: Arc<Mutex<RecordingMode>>,
+    /// Active render thread stop flag (set to true to request stop)
+    render_stop: Arc<AtomicBool>,
+    /// Active render thread handle (for join on stop)
+    render_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl WasapiBackend {
@@ -151,6 +156,8 @@ impl WasapiBackend {
             _thread_handle: thread_handle,
             aec_enabled,
             recording_mode,
+            render_stop: Arc::new(AtomicBool::new(false)),
+            render_thread: Mutex::new(None),
         })
     }
 }
@@ -226,6 +233,36 @@ impl AudioBackend for WasapiBackend {
 
     fn set_recording_mode(&self, mode: RecordingMode) {
         *self.recording_mode.lock().unwrap() = mode;
+    }
+
+    fn start_render(&self) -> Result<mpsc::SyncSender<Vec<f32>>, String> {
+        // Stop any previous render session.
+        self.stop_render()?;
+
+        let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(4);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        self.render_stop.store(false, Ordering::SeqCst);
+        let stop_clone = Arc::clone(&stop_flag);
+
+        // Also share the backend-level stop flag so stop_render() can signal.
+        let backend_stop = Arc::clone(&self.render_stop);
+
+        let handle = thread::spawn(move || {
+            run_render_thread(rx, stop_clone, backend_stop);
+        });
+
+        *self.render_thread.lock().unwrap() = Some(handle);
+        Ok(tx)
+    }
+
+    fn stop_render(&self) -> Result<(), String> {
+        self.render_stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.render_thread.lock().unwrap().take() {
+            // The thread checks the stop flag and will exit promptly.
+            // Give it a reasonable amount of time to finish.
+            let _ = handle.join();
+        }
+        Ok(())
     }
 }
 
@@ -1127,4 +1164,283 @@ impl Resampler {
 
         output
     }
+}
+
+// ---------------------------------------------------------------------------
+// Audio render (output) support
+// ---------------------------------------------------------------------------
+
+/// State for an active WASAPI render endpoint.
+struct RenderState {
+    audio_client: IAudioClient,
+    render_client: IAudioRenderClient,
+    buffer_frame_count: u32,
+    device_channels: u16,
+    device_sample_rate: u32,
+    event_handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.audio_client.Stop();
+            if !self.event_handle.is_invalid() {
+                let _ = windows::Win32::Foundation::CloseHandle(self.event_handle);
+            }
+        }
+    }
+}
+
+/// Open the default render endpoint and prepare for shared-mode output.
+unsafe fn open_render_endpoint() -> Result<RenderState, String> {
+    let enumerator: IMMDeviceEnumerator =
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("Render: failed to create device enumerator: {}", e))?;
+
+    let device: IMMDevice = enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .map_err(|e| format!("Render: failed to get default render device: {}", e))?;
+
+    let audio_client: IAudioClient = device
+        .Activate(CLSCTX_ALL, None)
+        .map_err(|e| format!("Render: failed to activate audio client: {}", e))?;
+
+    let mix_format_ptr = audio_client
+        .GetMixFormat()
+        .map_err(|e| format!("Render: failed to get mix format: {}", e))?;
+
+    let mix_format = &*mix_format_ptr;
+    let device_channels = mix_format.nChannels;
+    let device_sample_rate = mix_format.nSamplesPerSec;
+    let device_bits = mix_format.wBitsPerSample;
+
+    tracing::info!(
+        "Render: device format: {}Hz, {} channels, {} bits",
+        device_sample_rate,
+        device_channels,
+        device_bits,
+    );
+
+    let event_handle = CreateEventW(None, false, false, None)
+        .map_err(|e| format!("Render: failed to create event: {}", e))?;
+
+    // 100ms buffer in 100-nanosecond units.
+    let buffer_duration: i64 = 1_000_000;
+
+    // Use AUTOCONVERTPCM so WASAPI handles sample-rate conversion for us
+    // when our source rate (48 kHz mono→stereo) differs from the device
+    // mix format.  We still write f32 interleaved at the device channel
+    // count, but WASAPI will up/down-sample transparently.
+    let stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+        | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+    audio_client
+        .Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            stream_flags,
+            buffer_duration,
+            0,
+            mix_format_ptr,
+            None,
+        )
+        .map_err(|e| format!("Render: failed to initialize audio client: {}", e))?;
+
+    audio_client
+        .SetEventHandle(event_handle)
+        .map_err(|e| format!("Render: failed to set event handle: {}", e))?;
+
+    let render_client: IAudioRenderClient = audio_client
+        .GetService()
+        .map_err(|e| format!("Render: failed to get render client: {}", e))?;
+
+    let buffer_frame_count = audio_client
+        .GetBufferSize()
+        .map_err(|e| format!("Render: failed to get buffer size: {}", e))?;
+
+    windows::Win32::System::Com::CoTaskMemFree(Some(mix_format_ptr as *const _ as *const _));
+
+    // Pre-fill the buffer with silence so the stream can start cleanly.
+    {
+        if let Ok(_buf_ptr) = render_client.GetBuffer(buffer_frame_count) {
+            // Flag 0x2 = AUDCLNT_BUFFERFLAGS_SILENT
+            let _ = render_client.ReleaseBuffer(buffer_frame_count, 0x2);
+        }
+    }
+
+    audio_client
+        .Start()
+        .map_err(|e| format!("Render: failed to start audio client: {}", e))?;
+
+    tracing::info!(
+        "Render: endpoint opened, buffer={} frames",
+        buffer_frame_count
+    );
+
+    Ok(RenderState {
+        audio_client,
+        render_client,
+        buffer_frame_count,
+        device_channels,
+        device_sample_rate,
+        event_handle,
+    })
+}
+
+/// Expand mono f32 samples to N-channel interleaved f32 by duplicating.
+fn mono_to_n_channels(mono: &[f32], channels: u16) -> Vec<f32> {
+    let n = channels as usize;
+    let mut out = Vec::with_capacity(mono.len() * n);
+    for &s in mono {
+        for _ in 0..n {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Main render thread: receives mono f32 @ 48 kHz chunks, converts to device
+/// format and writes to the WASAPI render buffer.
+fn run_render_thread(
+    rx: mpsc::Receiver<Vec<f32>>,
+    stop_flag: Arc<AtomicBool>,
+    backend_stop: Arc<AtomicBool>,
+) {
+    // COM must be initialised per-thread.
+    let com_init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let com_ok = com_init.is_ok();
+
+    let state = unsafe { open_render_endpoint() };
+    let state = match state {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Render: failed to open endpoint: {}", e);
+            if com_ok {
+                unsafe { CoUninitialize() };
+            }
+            return;
+        }
+    };
+
+    let device_channels = state.device_channels;
+    let buffer_frame_count = state.buffer_frame_count;
+
+    // Resampler for 48 kHz → device rate (if different).
+    let mut resampler = if state.device_sample_rate != TARGET_SAMPLE_RATE {
+        Some(Resampler::new(TARGET_SAMPLE_RATE, state.device_sample_rate))
+    } else {
+        None
+    };
+
+    // Accumulate interleaved device-rate samples between event callbacks.
+    let mut pending: Vec<f32> = Vec::new();
+
+    tracing::info!("Render: thread started");
+
+    loop {
+        if stop_flag.load(Ordering::Relaxed) || backend_stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Drain all available chunks from the channel (non-blocking after
+        // the first blocking recv with timeout).
+        match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(mono_samples) => {
+                // Convert mono → device channels, then resample if needed.
+                let expanded = mono_to_n_channels(&mono_samples, device_channels);
+                let device_samples = if let Some(ref mut rs) = resampler {
+                    rs.process(&expanded, device_channels as usize)
+                } else {
+                    expanded
+                };
+                pending.extend_from_slice(&device_samples);
+
+                // Drain any additional available chunks without blocking.
+                while let Ok(more) = rx.try_recv() {
+                    let expanded = mono_to_n_channels(&more, device_channels);
+                    let device_samples = if let Some(ref mut rs) = resampler {
+                        rs.process(&expanded, device_channels as usize)
+                    } else {
+                        expanded
+                    };
+                    pending.extend_from_slice(&device_samples);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No data yet — loop and check stop flag.
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Producer dropped the sender — playback is over.
+                break;
+            }
+        }
+
+        // Wait for the render event (device is ready for more data).
+        unsafe {
+            WaitForSingleObject(state.event_handle, 50);
+        }
+
+        // Write as much pending data as the buffer can accept.
+        unsafe {
+            let padding = state
+                .audio_client
+                .GetCurrentPadding()
+                .unwrap_or(buffer_frame_count);
+            let available_frames = buffer_frame_count.saturating_sub(padding);
+            if available_frames == 0 {
+                continue;
+            }
+
+            let channels_usize = device_channels as usize;
+            let pending_frames = pending.len() / channels_usize;
+            let frames_to_write = available_frames.min(pending_frames as u32);
+            if frames_to_write == 0 {
+                continue;
+            }
+
+            if let Ok(buf_ptr) = state.render_client.GetBuffer(frames_to_write) {
+                let samples_to_write = frames_to_write as usize * channels_usize;
+                let dst = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, samples_to_write);
+                dst.copy_from_slice(&pending[..samples_to_write]);
+                let _ = state.render_client.ReleaseBuffer(frames_to_write, 0);
+                pending.drain(..samples_to_write);
+            }
+        }
+    }
+
+    // Drain any remaining buffered audio to the device before exiting.
+    unsafe {
+        let channels_usize = device_channels as usize;
+        let mut remaining_attempts = 50; // up to ~500ms
+        while !pending.is_empty() && remaining_attempts > 0 {
+            WaitForSingleObject(state.event_handle, 10);
+            let padding = state
+                .audio_client
+                .GetCurrentPadding()
+                .unwrap_or(buffer_frame_count);
+            let available_frames = buffer_frame_count.saturating_sub(padding);
+            let pending_frames = pending.len() / channels_usize;
+            let frames_to_write = available_frames.min(pending_frames as u32);
+            if frames_to_write > 0 {
+                if let Ok(buf_ptr) = state.render_client.GetBuffer(frames_to_write) {
+                    let samples_to_write = frames_to_write as usize * channels_usize;
+                    let dst = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, samples_to_write);
+                    dst.copy_from_slice(&pending[..samples_to_write]);
+                    let _ = state.render_client.ReleaseBuffer(frames_to_write, 0);
+                    pending.drain(..samples_to_write);
+                }
+            }
+            remaining_attempts -= 1;
+        }
+    }
+
+    // RenderState::drop will Stop() + CloseHandle().
+    drop(state);
+
+    if com_ok {
+        unsafe { CoUninitialize() };
+    }
+
+    tracing::info!("Render: thread stopped");
 }

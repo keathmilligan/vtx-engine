@@ -1,5 +1,7 @@
 //! Platform-agnostic audio backend trait.
 
+use std::sync::mpsc;
+
 pub use crate::{AudioData, AudioDevice, RecordingMode};
 
 /// Platform-agnostic audio backend interface.
@@ -41,4 +43,23 @@ pub trait AudioBackend: Send + Sync {
     /// implementation is a no-op; software gain is applied in the
     /// `AudioEngine` capture loop regardless.
     fn set_gain(&self, _db: f32) {}
+
+    /// Start audio output rendering on the system default output device.
+    ///
+    /// Returns a channel sender for pushing mono f32 samples at 48 kHz.
+    /// The backend opens a render endpoint and spawns a thread that
+    /// converts and writes samples to the device buffer.
+    ///
+    /// The default implementation returns an error indicating that
+    /// render output is not supported on this platform.
+    fn start_render(&self) -> Result<mpsc::SyncSender<Vec<f32>>, String> {
+        Err("Audio render output is not supported on this platform".to_string())
+    }
+
+    /// Stop audio output rendering and release the render endpoint.
+    ///
+    /// The default implementation is a no-op.
+    fn stop_render(&self) -> Result<(), String> {
+        Ok(())
+    }
 }

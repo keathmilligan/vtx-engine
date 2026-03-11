@@ -403,10 +403,10 @@ impl TranscribeState {
         }
 
         // --- Processed WAV ---
-        // Fire on_recording_saved with the processed path so the demo opens the
-        // gain/AGC-adjusted mono file (what the transcription engine sees).
-        // If processed samples are absent (e.g. AGC/gain never enabled) fall back
-        // to the raw path so the callback always fires exactly once per session.
+        // Save the processed WAV for transcription / reprocessing reference,
+        // but always fire the callback with the *raw* path so the demo's
+        // activeDocumentPath points to the unprocessed original.  This
+        // ensures that clicking Play always reprocesses from raw.
         if !processed_samples.is_empty() {
             let proc_filename = format!("{}-processed.wav", stem);
             let proc_path = recordings_dir.join(&proc_filename);
@@ -416,26 +416,19 @@ impl TranscribeState {
                         "[TranscribeState] Saved processed recording WAV to: {:?}",
                         proc_path
                     );
-                    if let Some(ref cb) = self.callback {
-                        cb.on_recording_saved(proc_path.to_string_lossy().to_string());
-                    }
                 }
                 Err(e) => {
                     tracing::error!(
                         "[TranscribeState] Failed to save processed recording WAV: {}",
                         e
                     );
-                    // Fall back to raw path so the session document is still set.
-                    if let Some(ref cb) = self.callback {
-                        cb.on_recording_saved(raw_path.to_string_lossy().to_string());
-                    }
                 }
             }
-        } else {
-            // No processed audio accumulated — fire callback with raw path.
-            if let Some(ref cb) = self.callback {
-                cb.on_recording_saved(raw_path.to_string_lossy().to_string());
-            }
+        }
+
+        // Always report the raw path so consumers open the unprocessed original.
+        if let Some(ref cb) = self.callback {
+            cb.on_recording_saved(raw_path.to_string_lossy().to_string());
         }
     }
 

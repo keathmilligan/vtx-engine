@@ -329,6 +329,7 @@ impl EngineBuilder {
             mic_gain_db: Arc::new(AtomicU32::new(initial_mic_gain_bits)),
             ptt_mode: Arc::new(AtomicBool::new(true)),
             agc_config: Arc::new(std::sync::Mutex::new(initial_agc_config)),
+            render_tx: Arc::new(std::sync::Mutex::new(None)),
         };
 
         Ok((engine, receiver))

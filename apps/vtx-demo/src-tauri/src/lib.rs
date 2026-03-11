@@ -136,17 +136,6 @@ async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<Option<Stri
 }
 
 #[tauri::command]
-async fn reprocess_file(
-    state: tauri::State<'_, AppState>,
-    path: String,
-    ptt_mode: bool,
-) -> Result<(), String> {
-    let engine_lock = state.engine.lock().await;
-    let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
-    engine.play_file(path, ptt_mode)
-}
-
-#[tauri::command]
 async fn open_file(
     state: tauri::State<'_, AppState>,
     path: String,
@@ -322,7 +311,6 @@ pub fn run() {
             stop_recording,
             is_recording,
             open_file,
-            reprocess_file,
             stop_playback,
             get_engine_config,
             set_engine_config,

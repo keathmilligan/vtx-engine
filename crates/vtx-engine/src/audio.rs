@@ -129,6 +129,41 @@ pub fn generate_recording_stem() -> String {
     format!("vtx-{}", now.format("%Y%m%d-%H%M%S"))
 }
 
+/// Resolve any WAV path (raw or processed) to the raw variant.
+///
+/// If the path ends in `-processed.wav`, the `-processed` suffix is stripped
+/// and the resulting raw path (`<stem>.wav`) is returned — provided the raw
+/// file exists on disk.  If the raw file is missing, the original path is
+/// returned as-is with a warning log.
+///
+/// Paths that are already raw (no `-processed` suffix) are returned unchanged.
+pub fn resolve_raw_wav_path(path: &std::path::Path) -> std::path::PathBuf {
+    let file_stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return path.to_path_buf(),
+    };
+
+    if let Some(base) = file_stem.strip_suffix("-processed") {
+        let raw_path = path.with_file_name(format!("{}.wav", base));
+        if raw_path.exists() {
+            tracing::info!(
+                "[audio] Resolved processed path to raw: {:?} -> {:?}",
+                path,
+                raw_path
+            );
+            raw_path
+        } else {
+            tracing::warn!(
+                "[audio] Raw file not found for {:?}, falling back to processed",
+                raw_path
+            );
+            path.to_path_buf()
+        }
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Extract the recording stem from an existing WAV file path.
 ///
 /// Given a path like `…/vtx-20260308-143022.wav` or

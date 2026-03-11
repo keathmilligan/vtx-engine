@@ -356,6 +356,9 @@ pub struct AudioEngine {
     /// The capture thread reads this via `try_lock` once per chunk.
     /// The public API writes it via `set_agc_config`.
     agc_config: Arc<std::sync::Mutex<AgcConfig>>,
+    /// Sender for pushing processed audio to the render output endpoint
+    /// during file playback.  Set by `play_file`, cleared on playback end.
+    render_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Vec<f32>>>>>,
 }
 
 impl AudioEngine {
@@ -472,6 +475,13 @@ impl AudioEngine {
     /// Stop an active file playback, if any.
     pub fn stop_playback(&self) {
         self.playback_active.store(false, Ordering::SeqCst);
+        // Drop the render sender and stop the render endpoint immediately.
+        {
+            let _ = self.render_tx.lock().unwrap().take();
+        }
+        if let Some(backend) = platform::get_backend() {
+            let _ = backend.stop_render();
+        }
     }
 
     /// Play a WAV file through the full engine pipeline (visualization + VAD +
@@ -497,7 +507,10 @@ impl AudioEngine {
         // Cancel any in-progress playback.
         self.stop_playback();
 
-        let path_str = path.as_ref().to_string_lossy().to_string();
+        // Resolve to the raw (unprocessed) WAV when a processed variant is
+        // provided, so playback always reprocesses from the original recording.
+        let resolved = crate::audio::resolve_raw_wav_path(path.as_ref());
+        let path_str = resolved.to_string_lossy().to_string();
 
         // Read the WAV file and decode to interleaved f32 samples.
         let reader = hound::WavReader::open(&path_str)
@@ -558,6 +571,20 @@ impl AudioEngine {
             ts.set_playback_source_stem(source_stem);
         }
 
+        // Start the audio render endpoint so processed samples are played
+        // through the speakers during playback.
+        if let Some(backend) = platform::get_backend() {
+            match backend.start_render() {
+                Ok(render_sender) => {
+                    *self.render_tx.lock().unwrap() = Some(render_sender);
+                }
+                Err(e) => {
+                    warn!("[Playback] Could not start render output: {}", e);
+                    // Non-fatal: playback still works for visualization and transcription.
+                }
+            }
+        }
+
         // In PTT mode, start a manual recording session so the whole file is
         // submitted as one segment when playback ends.
         if ptt_mode {
@@ -567,6 +594,7 @@ impl AudioEngine {
         let playback_active = self.playback_active.clone();
         let recording_active = self.recording_active.clone();
         let transcribe_state_arc = self.transcribe_state.clone();
+        let render_tx_arc = self.render_tx.clone();
         let sender = self.sender.clone();
         let samples_per_chunk = (wav_sample_rate as usize / 100) * wav_channels as usize; // 10ms chunks
         let chunk_duration = Duration::from_millis(10);
@@ -596,6 +624,15 @@ impl AudioEngine {
             }
 
             playback_active.store(false, Ordering::SeqCst);
+
+            // Drop the render sender to signal the render thread that no more
+            // samples are coming, then stop the render endpoint.
+            {
+                let _ = render_tx_arc.lock().unwrap().take();
+            }
+            if let Some(backend) = platform::get_backend() {
+                let _ = backend.stop_render();
+            }
 
             // In PTT mode, stop the manual recording session to submit the accumulated audio.
             if ptt_mode && recording_active.swap(false, Ordering::SeqCst) {
@@ -727,10 +764,12 @@ impl AudioEngine {
         let vad_enabled = self.vad_enabled;
         let visualization_enabled = self.visualization_enabled;
         let recording_active = self.recording_active.clone();
+        let playback_active_loop = self.playback_active.clone();
         let ptt_mode = self.ptt_mode.clone();
         let word_break_segmentation_enabled = self.config.word_break_segmentation_enabled;
         let mic_gain_db_atomic = self.mic_gain_db.clone();
         let agc_config_shared = self.agc_config.clone();
+        let render_tx_shared = self.render_tx.clone();
 
         loop_active.store(true, Ordering::SeqCst);
 
@@ -806,6 +845,17 @@ impl AudioEngine {
                         }
                         if let Some(viz) = viz_processor.process(&processed_samples) {
                             let _ = sender.send(EngineEvent::VisualizationData(viz));
+                        }
+                    }
+
+                    // --- Render output (during file playback) ---
+                    if playback_active_loop.load(Ordering::Relaxed) {
+                        if let Ok(guard) = render_tx_shared.try_lock() {
+                            if let Some(ref tx) = *guard {
+                                // try_send: drop the chunk if the render thread
+                                // is behind rather than blocking the audio loop.
+                                let _ = tx.try_send(processed_samples.clone());
+                            }
                         }
                     }
 

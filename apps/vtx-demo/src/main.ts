@@ -2,7 +2,7 @@
 //
 // Demonstrates live audio capture with visualization, and WAV file transcription.
 
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -167,7 +167,6 @@ function getCurrentSettings(): AppSettings {
 let isRecording = false;
 let isPlayingBack = false;
 let activeDocumentPath: string | null = null;
-let playbackAudio: HTMLAudioElement | null = null;
 let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
@@ -739,63 +738,31 @@ async function stopRecording() {
 // File Playback (Open / Reprocess)
 // =============================================================================
 
-/** Stop any in-progress audio element playback. */
-function stopAudioElement() {
-  if (playbackAudio) {
-    playbackAudio.pause();
-    playbackAudio.src = "";
-    playbackAudio = null;
-  }
-}
-
-/** Start playing a file through the engine pipeline and update UI state. */
+/** Start playing a file through the engine pipeline and update UI state.
+ *
+ * Audible output comes from the engine's WASAPI render endpoint — no browser
+ * audio element is used.  The engine reprocesses from the raw recording with
+ * the current processing settings (mic gain, AGC, etc.).
+ */
 async function startFilePlayback(filePath: string) {
-  // Stop any previous playback (audio element and engine pipeline).
-  stopAudioElement();
+  // Stop any previous engine pipeline playback.
   await invoke("stop_playback").catch(() => {});
 
   clearTranscriptionOutput();
   setPlayingBack(true);
   statusText.textContent = "Playing...";
 
-  // Prepare the audio element (but don't play yet).
-  const audioUrl = convertFileSrc(filePath);
-  playbackAudio = new Audio(audioUrl);
-
-  // Apply saved output device selection (task 8.9)
-  const sinkIdSupported = typeof (HTMLMediaElement.prototype as any).setSinkId === "function";
-  if (sinkIdSupported) {
-    const savedOutputId = loadSettings().audioOutputDeviceId;
-    if (savedOutputId) {
-      try {
-        await (playbackAudio as any).setSinkId(savedOutputId);
-      } catch (e) {
-        console.warn("setSinkId failed on playback start:", e);
-      }
-    }
-  }
-
   const pttMode = !autoTranscriptionEnabled;
 
   try {
-    // Start the engine pipeline first so it is already processing audio by the
-    // time the audio element begins playback. open_file() returns as soon as the
-    // feeder thread is spawned, so the IPC round-trip latency becomes a head-start
-    // for the pipeline rather than a lag behind the audio element.
     await invoke("open_file", { path: filePath, pttMode });
     // Engine pipeline runs in the background; onPlaybackComplete() fires via event.
   } catch (e) {
     console.error("Playback failed:", e);
     statusText.textContent = `Playback error: ${e}`;
-    stopAudioElement();
     setPlayingBack(false);
     return;
   }
-
-  // Start audible playback after the engine pipeline is running.
-  playbackAudio.play().catch((e) => {
-    console.error("Audio element playback failed:", e);
-  });
 }
 
 function setPlayingBack(active: boolean) {
@@ -819,7 +786,6 @@ function setPlayingBack(active: boolean) {
 }
 
 function onPlaybackComplete() {
-  stopAudioElement();
   isPlayingBack = false;
   waveformRenderer.stop();
   spectrogramRenderer.stop();
@@ -851,8 +817,7 @@ async function openWavFile() {
 
 async function togglePlayback() {
   if (isPlayingBack) {
-    // Stop active playback.
-    stopAudioElement();
+    // Stop active playback (engine handles render endpoint cleanup).
     await invoke("stop_playback").catch(() => {});
     onPlaybackComplete();
   } else if (activeDocumentPath) {
@@ -1191,6 +1156,7 @@ function closeConfigPanel(): void {
 
 /** Save the current form values, apply to backend, and close. */
 async function saveConfig(): Promise<void> {
+  console.log("saveConfig called");
   const cfg = readConfigForm();
 
   try {
@@ -1199,16 +1165,9 @@ async function saveConfig(): Promise<void> {
     console.error("Failed to set engine config:", e);
   }
 
-  // Apply output device selection via setSinkId
-  const sinkIdSupported = typeof (HTMLMediaElement.prototype as any).setSinkId === "function";
-  const selectedOutputId = cfgOutputDevice.value;
-  if (sinkIdSupported && playbackAudio) {
-    try {
-      await (playbackAudio as any).setSinkId(selectedOutputId);
-    } catch (e) {
-      console.warn("setSinkId failed:", e);
-    }
-  }
+  // NOTE: Output device selection via setSinkId has been removed — audible
+  // playback now goes through the engine's WASAPI render endpoint which uses
+  // the system default output device.
 
   // Persist to localStorage
   const s = loadSettings();
@@ -1227,11 +1186,12 @@ async function saveConfig(): Promise<void> {
     transcriptionQueueCapacity: cfg.transcription_queue_capacity,
     vizFrameIntervalMs: cfg.viz_frame_interval_ms,
     wordBreakSegmentationEnabled: cfg.word_break_segmentation_enabled,
-    audioOutputDeviceId: selectedOutputId,
+    audioOutputDeviceId: cfgOutputDevice.value,
   };
   saveSettings(updated);
-
+  console.log("Calling closeConfigPanel");
   closeConfigPanel();
+  console.log("closeConfigPanel called");
 }
 
 /** Reset all form fields to factory defaults without saving. */
