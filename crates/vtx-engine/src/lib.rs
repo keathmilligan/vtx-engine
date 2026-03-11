@@ -203,6 +203,15 @@ pub struct AgcConfig {
     /// Caps the AGC gain to prevent extreme amplification of quiet/silent input.
     #[serde(default = "default_agc_max_gain_db")]
     pub max_gain_db: f32,
+
+    /// Gate threshold in dBFS (default -50.0).
+    ///
+    /// When the smoothed power estimate falls below this level, the AGC decays
+    /// its gain toward unity (1.0) instead of continuing to boost. This prevents
+    /// the AGC from amplifying background noise during speech pauses.
+    /// Recommended range: -60.0 to -30.0 dBFS.
+    #[serde(default = "default_agc_gate_threshold_db")]
+    pub gate_threshold_db: f32,
 }
 
 fn default_agc_target_level_db() -> f32 { -18.0 }
@@ -210,6 +219,7 @@ fn default_agc_attack_time_ms() -> f32 { 10.0 }
 fn default_agc_release_time_ms() -> f32 { 200.0 }
 fn default_agc_min_gain_db() -> f32 { -6.0 }
 fn default_agc_max_gain_db() -> f32 { 30.0 }
+fn default_agc_gate_threshold_db() -> f32 { -50.0 }
 
 impl Default for AgcConfig {
     fn default() -> Self {
@@ -220,6 +230,7 @@ impl Default for AgcConfig {
             release_time_ms: default_agc_release_time_ms(),
             min_gain_db: default_agc_min_gain_db(),
             max_gain_db: default_agc_max_gain_db(),
+            gate_threshold_db: default_agc_gate_threshold_db(),
         }
     }
 }

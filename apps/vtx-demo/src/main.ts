@@ -57,6 +57,7 @@ interface AgcConfig {
   release_time_ms: number;
   min_gain_db: number;
   max_gain_db: number;
+  gate_threshold_db: number;
 }
 
 /** Mirror of the Rust EngineConfig struct (snake_case matches serde output). */
@@ -98,6 +99,7 @@ interface AppSettings {
   // AGC fields
   agcEnabled: boolean;
   agcTargetLevelDb: number;
+  agcGateThresholdDb: number;
 }
 
 function loadSettings(): AppSettings {
@@ -135,6 +137,7 @@ function defaultSettings(): AppSettings {
     // AGC defaults (must match Rust AgcConfig defaults)
     agcEnabled: false,
     agcTargetLevelDb: -18.0,
+    agcGateThresholdDb: -50.0,
   };
 }
 
@@ -976,6 +979,8 @@ const cfgMicGainDisplay = document.getElementById("cfg-mic-gain-display") as HTM
 const cfgAgcEnabled = document.getElementById("cfg-agc-enabled") as HTMLInputElement;
 const cfgAgcTargetLevel = document.getElementById("cfg-agc-target-level") as HTMLInputElement;
 const cfgAgcTargetLevelDisplay = document.getElementById("cfg-agc-target-level-display") as HTMLSpanElement;
+const cfgAgcGateThreshold = document.getElementById("cfg-agc-gate-threshold") as HTMLInputElement;
+const cfgAgcGateThresholdDisplay = document.getElementById("cfg-agc-gate-threshold-display") as HTMLSpanElement;
 
 // Voice Detection
 const cfgVadVoicedThreshold = document.getElementById("cfg-vad-voiced-threshold") as HTMLInputElement;
@@ -1007,6 +1012,9 @@ function populateConfigForm(cfg: EngineConfig): void {
   cfgAgcTargetLevel.value = String(cfg.agc.target_level_db);
   cfgAgcTargetLevel.disabled = !cfg.agc.enabled;
   updateAgcTargetDisplay(cfg.agc.target_level_db);
+  cfgAgcGateThreshold.value = String(cfg.agc.gate_threshold_db);
+  cfgAgcGateThreshold.disabled = !cfg.agc.enabled;
+  updateAgcGateThresholdDisplay(cfg.agc.gate_threshold_db);
   cfgVadVoicedThreshold.value = String(cfg.vad_voiced_threshold_db);
   cfgVadWhisperThreshold.value = String(cfg.vad_whisper_threshold_db);
   cfgVadVoicedOnset.value = String(cfg.vad_voiced_onset_ms);
@@ -1035,6 +1043,7 @@ function readConfigForm(): EngineConfig {
       release_time_ms: 200.0,
       min_gain_db: -6.0,
       max_gain_db: 30.0,
+      gate_threshold_db: parseFloat(cfgAgcGateThreshold.value),
     },
     vad_voiced_threshold_db: parseFloat(cfgVadVoicedThreshold.value),
     vad_whisper_threshold_db: parseFloat(cfgVadWhisperThreshold.value),
@@ -1058,6 +1067,11 @@ function updateGainDisplay(db: number): void {
 /** Update the live dBFS readout next to the AGC target level slider. */
 function updateAgcTargetDisplay(db: number): void {
   cfgAgcTargetLevelDisplay.textContent = `${db.toFixed(1)} dBFS`;
+}
+
+/** Update the live dBFS readout next to the AGC gate threshold slider. */
+function updateAgcGateThresholdDisplay(db: number): void {
+  cfgAgcGateThresholdDisplay.textContent = `${db.toFixed(1)} dBFS`;
 }
 
 /** Populate the output device selector from the browser's device list. */
@@ -1176,6 +1190,7 @@ async function saveConfig(): Promise<void> {
     micGainDb: cfg.mic_gain_db,
     agcEnabled: cfg.agc.enabled,
     agcTargetLevelDb: cfg.agc.target_level_db,
+    agcGateThresholdDb: cfg.agc.gate_threshold_db,
     vadVoicedThresholdDb: cfg.vad_voiced_threshold_db,
     vadWhisperThresholdDb: cfg.vad_whisper_threshold_db,
     vadVoicedOnsetMs: cfg.vad_voiced_onset_ms,
@@ -1214,6 +1229,7 @@ function settingsToEngineConfig(s: AppSettings): EngineConfig {
       release_time_ms: 200.0,
       min_gain_db: -6.0,
       max_gain_db: 30.0,
+      gate_threshold_db: s.agcGateThresholdDb,
     },
     vad_voiced_threshold_db: s.vadVoicedThresholdDb,
     vad_whisper_threshold_db: s.vadWhisperThresholdDb,
@@ -1248,11 +1264,17 @@ function setupConfigPanelListeners(): void {
   // AGC: toggle slider enabled state when checkbox changes
   cfgAgcEnabled.addEventListener("change", () => {
     cfgAgcTargetLevel.disabled = !cfgAgcEnabled.checked;
+    cfgAgcGateThreshold.disabled = !cfgAgcEnabled.checked;
   });
 
   // Live dBFS readout on AGC target level slider input
   cfgAgcTargetLevel.addEventListener("input", () => {
     updateAgcTargetDisplay(parseFloat(cfgAgcTargetLevel.value));
+  });
+
+  // Live dBFS readout on AGC gate threshold slider input
+  cfgAgcGateThreshold.addEventListener("input", () => {
+    updateAgcGateThresholdDisplay(parseFloat(cfgAgcGateThreshold.value));
   });
 }
 
