@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# release.sh — bump version, tag, and push to trigger the publish workflow.
+# release.sh — bump version, sync lockfile, tag, and push to trigger the
+# publish workflow.
 #
-# Usage: ./scripts/release.sh <new-version>
-#   e.g. ./scripts/release.sh 0.1.2
+# Usage: ./scripts/release.sh vX.Y.Z [--dry-run]
 #
 # The script will:
-#   1. Validate the new version is a valid semver and a forward increment.
-#   2. Confirm there are no uncommitted changes.
-#   3. Update the version in Cargo.toml (workspace root).
-#   4. Commit the change.
-#   5. Create an annotated git tag vX.Y.Z.
-#   6. Push the commit and tag to origin.
+#   1. Validate the tag format (vX.Y.Z) and that the version is a valid
+#      forward increment from the latest existing tag.
+#   2. Confirm there are no uncommitted changes (unless --dry-run).
+#   3. Update version in all versioned files (Cargo.toml, package.json,
+#      tauri.conf.json).
+#   4. Sync Cargo.lock via `cargo update --workspace`.
+#   5. Commit, create a git tag, and push (unless --dry-run).
 
 set -euo pipefail
 
@@ -20,22 +21,36 @@ set -euo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }
 
-semver_parts() {
-    # Strips optional leading 'v', then splits on '.'
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/release.sh vX.Y.Z [--dry-run]
+
+Validates version increment, updates versioned files, commits changes,
+pushes, creates the tag, and pushes the tag.
+
+Options:
+  --dry-run   Apply local file updates only (no git commands).
+EOF
+    exit 0
+}
+
+parse_semver() {
+    # Returns "major minor patch" or empty on failure
     local v="${1#v}"
-    IFS='.' read -r major minor patch <<< "$v"
-    echo "$major $minor $patch"
+    if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+    fi
 }
 
-valid_semver() {
-    [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+valid_tag() {
+    [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
-# Compare two bare semver strings (no 'v' prefix). Returns 0 if $1 > $2.
+# Returns 0 if $1 > $2 in semver ordering.
 semver_gt() {
     local a_maj a_min a_pat b_maj b_min b_pat
-    read -r a_maj a_min a_pat <<< "$(semver_parts "$1")"
-    read -r b_maj b_min b_pat <<< "$(semver_parts "$2")"
+    read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
+    read -r b_maj b_min b_pat <<< "$(parse_semver "$2")"
 
     if   (( a_maj > b_maj )); then return 0
     elif (( a_maj < b_maj )); then return 1
@@ -46,78 +61,164 @@ semver_gt() {
     fi
 }
 
+# Validates that $1 is a correct semver increment over $2.
+# - Patch bump: same major.minor, patch incremented by any amount.
+# - Minor bump: same major, minor incremented, patch must be 0.
+# - Major bump: major incremented, minor and patch must be 0.
+is_valid_increment() {
+    local a_maj a_min a_pat b_maj b_min b_pat
+    read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
+    read -r b_maj b_min b_pat <<< "$(parse_semver "$2")"
+
+    if (( a_maj == b_maj && a_min == b_min )); then
+        (( a_pat > b_pat )) && return 0
+    elif (( a_maj == b_maj && a_min > b_min )); then
+        (( a_pat == 0 )) && return 0
+    elif (( a_maj > b_maj )); then
+        (( a_min == 0 && a_pat == 0 )) && return 0
+    fi
+    return 1
+}
+
+# Update a JSON file's top-level "version" field.
+update_json_version() {
+    local file="$1"
+    node -e "
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+if (!('version' in data)) { console.error('error: no version field in ' + process.argv[1]); process.exit(1); }
+data.version = process.argv[2];
+fs.writeFileSync(process.argv[1], JSON.stringify(data, null, 2) + '\n');
+" "$file" "$VERSION"
+    echo "  updated $file"
+}
+
 # ---------------------------------------------------------------------------
-# Argument validation
+# Argument parsing
 # ---------------------------------------------------------------------------
 
-[[ $# -eq 1 ]] || die "usage: $0 <new-version>  (e.g. $0 0.1.2)"
+DRY_RUN=false
+TAG=""
 
-NEW_VERSION="${1#v}"   # strip any leading 'v' the user may have typed
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)  usage ;;
+        --dry-run)  DRY_RUN=true ;;
+        *)
+            [[ -z "$TAG" ]] || die "unexpected argument: $arg"
+            TAG="$arg"
+            ;;
+    esac
+done
 
-valid_semver "$NEW_VERSION" || die "'$NEW_VERSION' is not a valid semver (expected X.Y.Z)"
+[[ -n "$TAG" ]] || die "usage: $0 vX.Y.Z [--dry-run]"
+valid_tag "$TAG" || die "invalid version tag: $TAG (expected vX.Y.Z)"
 
-CARGO_TOML="$(git rev-parse --show-toplevel)/Cargo.toml"
-[[ -f "$CARGO_TOML" ]] || die "Cargo.toml not found at $CARGO_TOML"
-
-# Read current workspace version
-CURRENT_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/')
-[[ -n "$CURRENT_VERSION" ]] || die "Could not read current version from Cargo.toml"
-
-echo "Current version : $CURRENT_VERSION"
-echo "New version     : $NEW_VERSION"
-
-# Verify the new version is strictly greater than the current one
-semver_gt "$NEW_VERSION" "$CURRENT_VERSION" \
-    || die "'$NEW_VERSION' is not a forward increment from '$CURRENT_VERSION'"
-
-TAG="v${NEW_VERSION}"
-
-# Verify the tag does not already exist locally or on remote
-git fetch --tags --quiet
-git rev-parse "$TAG" &>/dev/null && die "Tag '$TAG' already exists"
+VERSION="${TAG#v}"
 
 # ---------------------------------------------------------------------------
-# Working tree must be clean
+# Repository root
 # ---------------------------------------------------------------------------
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    die "Working tree has uncommitted changes — commit or stash them first"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# ---------------------------------------------------------------------------
+# Tag / version validation
+# ---------------------------------------------------------------------------
+
+# Check the tag doesn't already exist
+EXISTING_TAG=$(git tag --list "$TAG")
+[[ -z "$EXISTING_TAG" ]] || die "tag $TAG already exists"
+
+# Get latest tag for increment validation
+LATEST_TAG=$(git tag --list 'v*' --merged HEAD --sort=-v:refname | head -n1)
+
+if [[ -n "$LATEST_TAG" ]]; then
+    echo "Latest tag      : $LATEST_TAG"
+    echo "New tag         : $TAG"
+
+    semver_gt "$TAG" "$LATEST_TAG" \
+        || die "$VERSION is not greater than $LATEST_TAG"
+    is_valid_increment "$TAG" "$LATEST_TAG" \
+        || die "$VERSION is not a valid increment of $LATEST_TAG"
+else
+    echo "No previous tags found — treating as first release."
+    echo "New tag         : $TAG"
 fi
 
 # ---------------------------------------------------------------------------
-# Update Cargo.toml
+# Working tree must be clean (unless --dry-run)
 # ---------------------------------------------------------------------------
 
-echo "Updating Cargo.toml..."
-# Replace the first occurrence of  version = "X.Y.Z"  (the workspace version line)
-python3 -c "
-import re, sys
-text = open(sys.argv[1]).read()
-new_text, n = re.subn(r'^version = \"' + re.escape(sys.argv[2]) + r'\"', 'version = \"' + sys.argv[3] + '\"', text, count=1, flags=re.MULTILINE)
-if n == 0:
-    sys.exit(1)
-open(sys.argv[1], 'w').write(new_text)
-" "$CARGO_TOML" "$CURRENT_VERSION" "$NEW_VERSION"
+if [[ "$DRY_RUN" == false ]]; then
+    DIRTY=$(git status --porcelain)
+    if [[ -n "$DIRTY" ]]; then
+        die "working tree is not clean — commit or stash changes first"
+    fi
+fi
 
+# ---------------------------------------------------------------------------
+# Update versioned files
+# ---------------------------------------------------------------------------
+
+echo "Updating versions to $VERSION..."
+
+# Workspace Cargo.toml (the authoritative version for Rust crates)
+CARGO_TOML="$REPO_ROOT/Cargo.toml"
+sed -i "0,/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/s//version = \"$VERSION\"/" "$CARGO_TOML"
 # Verify the replacement took
-UPDATED_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/')
-[[ "$UPDATED_VERSION" == "$NEW_VERSION" ]] \
-    || die "Failed to update version in Cargo.toml (got '$UPDATED_VERSION')"
+UPDATED=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/')
+[[ "$UPDATED" == "$VERSION" ]] \
+    || die "failed to update version in $CARGO_TOML (got '$UPDATED')"
+echo "  updated $CARGO_TOML"
+
+# package.json / tauri.conf.json files with a version field
+update_json_version "$REPO_ROOT/packages/vtx-viz/package.json"
+update_json_version "$REPO_ROOT/apps/vtx-demo/package.json"
+update_json_version "$REPO_ROOT/apps/vtx-demo/src-tauri/tauri.conf.json"
+
+# ---------------------------------------------------------------------------
+# Sync Cargo.lock
+# ---------------------------------------------------------------------------
+
+echo "Syncing Cargo.lock..."
+(cd "$REPO_ROOT" && cargo update --workspace)
+
+# ---------------------------------------------------------------------------
+# Dry-run exit
+# ---------------------------------------------------------------------------
+
+if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    echo "Dry run complete. Local files updated; no git commands executed."
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Commit, tag, push
 # ---------------------------------------------------------------------------
 
 echo "Committing version bump..."
-git add "$CARGO_TOML"
-git commit -m "chore: bump version to ${NEW_VERSION}"
+git add \
+    "$REPO_ROOT/Cargo.toml" \
+    "$REPO_ROOT/Cargo.lock" \
+    "$REPO_ROOT/packages/vtx-viz/package.json" \
+    "$REPO_ROOT/apps/vtx-demo/package.json" \
+    "$REPO_ROOT/apps/vtx-demo/src-tauri/tauri.conf.json"
 
-echo "Creating tag $TAG..."
-git tag -a "$TAG" -m "Release ${NEW_VERSION}"
+STAGED=$(git diff --cached --name-only)
+if [[ -z "$STAGED" ]]; then
+    die "no changes staged for commit — aborting release"
+fi
 
-echo "Pushing commit and tag to origin..."
-git push origin HEAD
+git commit -m "chore: release $TAG"
+
+echo "Pushing commit..."
+git push
+
+echo "Creating and pushing tag $TAG..."
+git tag "$TAG"
 git push origin "$TAG"
 
 echo ""
-echo "Released $TAG — the publish workflow will start shortly."
+echo "Release $TAG prepared and pushed."

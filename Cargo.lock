@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "vtx-demo"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "vtx-engine"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "aec3",
  "block2 0.5.1",
