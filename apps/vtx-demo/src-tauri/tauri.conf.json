@@ -1,6 +1,6 @@
 {
   "productName": "vtx-demo",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "identifier": "io.vtx-engine.demo",
   "build": {
     "beforeDevCommand": "pnpm dev",
