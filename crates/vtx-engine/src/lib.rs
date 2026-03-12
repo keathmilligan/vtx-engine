@@ -325,6 +325,12 @@ where
 pub struct AudioEngine {
     /// Engine configuration
     config: EngineConfig,
+    /// Runtime recording-mode override.
+    ///
+    /// When `Some`, this value is used instead of `config.recording_mode` for
+    /// every `start_capture` call.  Updated via `set_recording_mode` without
+    /// requiring `&mut self`.
+    recording_mode_override: Arc<std::sync::Mutex<Option<RecordingMode>>>,
     /// Broadcast sender — all threads send events here
     sender: Arc<broadcast::Sender<EngineEvent>>,
     /// Transcription queue (None if transcription disabled)
@@ -685,6 +691,20 @@ impl AudioEngine {
             .unwrap_or_default()
     }
 
+    /// Return the system default audio output device (loopback/render endpoint).
+    ///
+    /// On Windows this resolves the default render endpoint via
+    /// `GetDefaultAudioEndpoint(eRender, eConsole)`.  On macOS it resolves
+    /// the default output device via CoreAudio.  On Linux and other platforms
+    /// this returns the first enumerated system device as a best-effort
+    /// fallback.
+    ///
+    /// Returns `None` if no system devices are available.
+    pub fn get_default_system_device(&self) -> Option<AudioDevice> {
+        platform::get_backend()
+            .and_then(|b| b.get_default_system_device())
+    }
+
     /// Start audio capture from the specified sources.
     ///
     /// - `source1_id`: Primary input device (microphone). Required.
@@ -701,11 +721,20 @@ impl AudioEngine {
         let backend = platform::get_backend()
             .ok_or_else(|| "Audio backend not initialized".to_string())?;
 
+        // Resolve the effective recording mode: use the live override when set,
+        // otherwise fall back to the baked-in EngineConfig value.
+        let effective_recording_mode = self
+            .recording_mode_override
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(self.config.recording_mode);
+
         // When echo cancellation is requested, source2 must be a system audio
         // device (loopback/render endpoint).  AEC requires a render reference:
         // if source2 is a microphone/input device the render buffer is never
         // filled and AEC will suppress the primary mic signal entirely.
-        if self.config.recording_mode == RecordingMode::EchoCancel {
+        if effective_recording_mode == RecordingMode::EchoCancel {
             if let Some(ref id) = source2_id {
                 let system_ids: std::collections::HashSet<String> = backend
                     .list_system_devices()
@@ -730,8 +759,8 @@ impl AudioEngine {
         }
 
         // Consolidate AEC into recording_mode — EchoCancel implies AEC enabled
-        backend.set_aec_enabled(self.config.recording_mode == RecordingMode::EchoCancel);
-        backend.set_recording_mode(self.config.recording_mode);
+        backend.set_aec_enabled(effective_recording_mode == RecordingMode::EchoCancel);
+        backend.set_recording_mode(effective_recording_mode);
         backend.start_capture_sources(source1_id.clone(), source2_id.clone())?;
 
         let sample_rate = backend.sample_rate();
@@ -1006,6 +1035,22 @@ impl AudioEngine {
     /// Get the current engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Set the recording mode for the next `start_capture` call.
+    ///
+    /// This overrides the `recording_mode` baked into `EngineConfig` at build
+    /// time, allowing the mode to be updated at runtime without requiring a
+    /// mutable reference to the engine.  The override is applied immediately
+    /// on the next `start_capture` call.
+    ///
+    /// This is the preferred path for the FlowSTT app layer to switch between
+    /// `Mixed` (mic-only) and `EchoCancel` (AEC active) modes based on whether
+    /// a reference device (source2) is configured.
+    pub fn set_recording_mode(&self, mode: RecordingMode) {
+        if let Ok(mut guard) = self.recording_mode_override.lock() {
+            *guard = Some(mode);
+        }
     }
 
     /// Update the engine configuration.

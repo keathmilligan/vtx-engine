@@ -18,6 +18,17 @@ pub trait AudioBackend: Send + Sync {
     /// List available system audio devices (monitors/loopbacks).
     fn list_system_devices(&self) -> Vec<AudioDevice>;
 
+    /// Return the system default audio output device (loopback/render endpoint).
+    ///
+    /// The default implementation returns the first device from
+    /// [`list_system_devices`], which is a best-effort fallback on platforms
+    /// that do not override this method.  Platform backends that can resolve
+    /// the OS default output endpoint should override this to return the
+    /// correct device regardless of enumeration order.
+    fn get_default_system_device(&self) -> Option<AudioDevice> {
+        self.list_system_devices().into_iter().next()
+    }
+
     /// Start audio capture from the specified sources.
     fn start_capture_sources(
         &self,

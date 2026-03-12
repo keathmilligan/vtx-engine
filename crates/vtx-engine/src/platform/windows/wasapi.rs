@@ -177,6 +177,19 @@ impl AudioBackend for WasapiBackend {
         self.system_devices.lock().unwrap().clone()
     }
 
+    fn get_default_system_device(&self) -> Option<AudioDevice> {
+        // Resolve the OS default render endpoint ID via WASAPI and match it
+        // against the enumerated system device list so we return the same
+        // AudioDevice struct (with the "(Loopback)" suffix already applied).
+        let default_id = unsafe { get_default_render_device_id() }.ok()?;
+        self.system_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.id == default_id)
+            .cloned()
+    }
+
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -273,6 +286,32 @@ pub fn create_backend(
 ) -> Result<Box<dyn AudioBackend>, String> {
     let backend = WasapiBackend::new(aec_enabled, recording_mode)?;
     Ok(Box::new(backend))
+}
+
+/// Return the WASAPI endpoint ID of the system default audio render device.
+///
+/// Uses `GetDefaultAudioEndpoint(eRender, eConsole)` — the same call used by
+/// `open_render_endpoint()` for audio playback.  The returned string matches
+/// the `id` field of devices produced by `enumerate_render_devices()`.
+///
+/// # Safety
+/// Calls raw COM APIs; the caller must ensure COM is initialised on this thread.
+unsafe fn get_default_render_device_id() -> Result<String, String> {
+    let enumerator: IMMDeviceEnumerator =
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
+
+    let device: IMMDevice = enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .map_err(|e| format!("Failed to get default render device: {}", e))?;
+
+    let id_ptr: PWSTR = device
+        .GetId()
+        .map_err(|e| format!("Failed to get device ID: {}", e))?;
+    let id = pwstr_to_string(id_ptr);
+    windows::Win32::System::Com::CoTaskMemFree(Some(id_ptr.0 as *const _));
+
+    Ok(id)
 }
 
 /// Enumerate available input devices (microphones)
