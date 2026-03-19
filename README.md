@@ -175,6 +175,15 @@ renderer.clear();    // reset all history and scroll state
 
 `BaseEn` is the default. Use `ModelManager` to download models at runtime.
 
+## Running the Demo App
+
+A Tauri-based demo application is included in `apps/vtx-demo`:
+
+```sh
+# Install dependencies
+make demo-dev
+```
+
 ## Prerequisites
 
 - Rust stable toolchain

@@ -38,12 +38,13 @@ test-verbose:
 ## Development targets
 ##
 
-## Run the demo app in Vite dev mode (web only, no Tauri)
-dev-demo:
-	pnpm --filter vtx-demo dev
+node_modules: pnpm-lock.yaml
+	pnpm install
+
+install: node_modules
 
 ## Run the demo app in Tauri development mode
-dev-tauri:
+demo-dev: install
 	pnpm --filter vtx-demo tauri dev
 
 ## Watch and rebuild the viz package on changes
