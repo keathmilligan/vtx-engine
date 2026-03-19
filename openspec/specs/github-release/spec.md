@@ -5,10 +5,10 @@ Defines requirements for automatically creating a GitHub release when a version 
 ## Requirements
 
 ### Requirement: Version tag creates a GitHub release
-When a version tag is pushed, the CI workflow SHALL automatically create a GitHub release using the pushed tag. The release SHALL be created only after the crates.io publish step succeeds.
+When a version tag is pushed (via the release workflow), the CI workflow SHALL automatically create a GitHub release using the pushed tag. The release SHALL be created only after the crates.io publish step succeeds.
 
 #### Scenario: Successful tag push creates release
-- **WHEN** a git tag matching `v*` is pushed and the crate is published successfully
+- **WHEN** a git tag matching `v*` is pushed (via release workflow) and the crate is published successfully
 - **THEN** a GitHub release is created with the tag name as the release title
 
 #### Scenario: Crate publish failure blocks release creation
