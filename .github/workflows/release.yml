@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (vX.Y.Z format)'
+        description: "Version tag (vX.Y.Z format)"
         required: true
         type: string
       force:
-        description: 'Skip validation and allow re-releasing existing version'
+        description: "Skip validation and allow re-releasing existing version"
         required: false
         default: false
         type: boolean
@@ -64,22 +64,22 @@ jobs:
         run: |
           NEW_TAG="${{ steps.validate-format.outputs.version }}"
           LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-          
+
           if [[ -z "$LATEST_TAG" ]]; then
             echo "No previous tags found — treating as first release."
             exit 0
           fi
-          
+
           echo "Latest tag: $LATEST_TAG"
           echo "New tag: $NEW_TAG"
-          
+
           parse_semver() {
             local v="${1#v}"
             if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
               echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
             fi
           }
-          
+
           semver_gt() {
             local a_maj a_min a_pat b_maj b_min b_pat
             read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
@@ -93,7 +93,7 @@ jobs:
             else return 1
             fi
           }
-          
+
           is_valid_increment() {
             local a_maj a_min a_pat b_maj b_min b_pat
             read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
@@ -108,12 +108,12 @@ jobs:
             fi
             return 1
           }
-          
+
           if ! semver_gt "$NEW_TAG" "$LATEST_TAG"; then
             echo "::error::$NEW_TAG is not greater than $LATEST_TAG"
             exit 1
           fi
-          
+
           if ! is_valid_increment "$NEW_TAG" "$LATEST_TAG"; then
             echo "::error::$NEW_TAG is not a valid increment of $LATEST_TAG"
             exit 1
@@ -133,7 +133,7 @@ jobs:
       - name: Update version in package.json files
         run: |
           VERSION="${{ steps.validate-format.outputs.version_number }}"
-          
+
           update_json_version() {
             local file="$1"
             node -e "
@@ -148,7 +148,7 @@ jobs:
             " "$file" "$VERSION"
             echo "Updated $file"
           }
-          
+
           update_json_version "packages/vtx-viz/package.json"
           update_json_version "apps/vtx-demo/package.json"
           update_json_version "apps/vtx-demo/src-tauri/tauri.conf.json"
@@ -175,7 +175,7 @@ jobs:
       - name: Push commit and tag
         run: |
           TAG="${{ steps.validate-format.outputs.version }}"
-          git push origin HEAD:main
+          git push origin HEAD:master
           git tag "$TAG"
           git push origin "$TAG"
 
