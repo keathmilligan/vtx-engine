@@ -839,3 +839,160 @@ button#btn-download-model:hover:not(:disabled) {
   border-color: var(--border-hover);
   color: var(--text-primary);
 }
+
+/* Model list styles */
+.config-model-warning {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 4px;
+  font-size: 11px;
+  color: #f59e0b;
+}
+
+.config-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  transition: background 0.15s;
+}
+
+.config-model-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.config-model-row.selected {
+  background: rgba(57, 108, 216, 0.1);
+}
+
+.config-model-radio {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--btn-primary-bg);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.config-model-radio:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.config-model-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  min-width: 80px;
+}
+
+.config-model-size {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 50px;
+  text-align: right;
+}
+
+.config-model-status {
+  font-size: 11px;
+  min-width: 70px;
+  text-align: right;
+}
+
+.config-model-status.downloaded {
+  color: rgba(34, 197, 94, 0.85);
+}
+
+.config-model-status.not-downloaded {
+  color: var(--text-muted);
+}
+
+.config-model-status.downloading {
+  color: var(--btn-primary-bg);
+}
+
+.config-model-status.error {
+  color: #ef4444;
+}
+
+.config-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 100px;
+  justify-content: flex-end;
+}
+
+.config-model-btn {
+  background: var(--surface-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.config-model-btn:hover:not(:disabled) {
+  background: var(--border-default);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.config-model-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.config-model-btn.download {
+  background: rgba(57, 108, 216, 0.15);
+  color: var(--btn-primary-bg);
+  border-color: rgba(57, 108, 216, 0.3);
+}
+
+.config-model-btn.download:hover:not(:disabled) {
+  background: rgba(57, 108, 216, 0.25);
+  border-color: rgba(57, 108, 216, 0.5);
+}
+
+.config-model-btn.cancel {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.config-model-btn.cancel:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.config-model-progress {
+  width: 80px;
+  height: 4px;
+  background: var(--surface-input);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.config-model-progress .fill {
+  height: 100%;
+  background: var(--btn-primary-bg);
+  transition: width 0.2s;
+}
+
+.config-model-error {
+  font-size: 10px;
+  color: #ef4444;
+  max-width: 150px;
+  text-align: right;
+}

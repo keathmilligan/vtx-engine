@@ -76,6 +76,7 @@ impl std::error::Error for ModelError {
 ///
 /// Construct via [`ModelManager::new`]. Does not require a running
 /// [`AudioEngine`] instance.
+#[derive(Clone)]
 pub struct ModelManager {
     /// Root cache directory: `{platform_cache}/{app_name}/whisper/`
     cache_dir: PathBuf,

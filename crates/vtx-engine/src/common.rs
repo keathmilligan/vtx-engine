@@ -480,27 +480,31 @@ pub struct SpeechMetrics {
 /// Variants are listed roughly in order of size (smallest to largest).
 /// En-suffixed variants are English-only and are generally faster for
 /// English-language audio.
+///
+/// Sizes from <https://huggingface.co/ggerganov/whisper.cpp>.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WhisperModel {
-    /// ~39 MB — fastest, English-only
+    /// ~75 MiB — fastest, English-only
     TinyEn,
-    /// ~39 MB — fastest, multilingual
+    /// ~75 MiB — fastest, multilingual
     Tiny,
-    /// ~74 MB — fast, English-only
+    /// ~142 MiB — fast, English-only
     #[default]
     BaseEn,
-    /// ~74 MB — fast, multilingual
+    /// ~142 MiB — fast, multilingual
     Base,
-    /// ~244 MB — good balance, English-only
+    /// ~466 MiB — good balance, English-only
     SmallEn,
-    /// ~244 MB — good balance, multilingual
+    /// ~466 MiB — good balance, multilingual
     Small,
-    /// ~769 MB — high accuracy, English-only
+    /// ~1.5 GiB — high accuracy, English-only
     MediumEn,
-    /// ~769 MB — high accuracy, multilingual
+    /// ~1.5 GiB — high accuracy, multilingual
     Medium,
-    /// ~1.5 GB — best accuracy, multilingual
+    /// ~1.5 GiB — fast large model, multilingual (distilled from large-v3)
+    LargeV3Turbo,
+    /// ~2.9 GiB — best accuracy, multilingual
     LargeV3,
 }
 
@@ -518,6 +522,7 @@ impl WhisperModel {
             WhisperModel::Small => "small",
             WhisperModel::MediumEn => "medium.en",
             WhisperModel::Medium => "medium",
+            WhisperModel::LargeV3Turbo => "large-v3-turbo",
             WhisperModel::LargeV3 => "large-v3",
         }
     }
@@ -528,6 +533,40 @@ impl WhisperModel {
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
             self.slug()
         )
+    }
+
+    /// Return the approximate model file size in megabytes (MiB).
+    ///
+    /// Values from <https://huggingface.co/ggerganov/whisper.cpp>.
+    pub fn size_mb(self) -> u32 {
+        match self {
+            WhisperModel::TinyEn => 75,
+            WhisperModel::Tiny => 75,
+            WhisperModel::BaseEn => 142,
+            WhisperModel::Base => 142,
+            WhisperModel::SmallEn => 466,
+            WhisperModel::Small => 466,
+            WhisperModel::MediumEn => 1536,
+            WhisperModel::Medium => 1536,
+            WhisperModel::LargeV3Turbo => 1536,
+            WhisperModel::LargeV3 => 2970,
+        }
+    }
+
+    /// Return a human-readable display name for this model.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            WhisperModel::TinyEn => "Tiny En",
+            WhisperModel::Tiny => "Tiny",
+            WhisperModel::BaseEn => "Base En",
+            WhisperModel::Base => "Base",
+            WhisperModel::SmallEn => "Small En",
+            WhisperModel::Small => "Small",
+            WhisperModel::MediumEn => "Medium En",
+            WhisperModel::Medium => "Medium",
+            WhisperModel::LargeV3Turbo => "Large V3 Turbo",
+            WhisperModel::LargeV3 => "Large V3",
+        }
     }
 
     /// Return all variants in ascending order of model size.
@@ -541,6 +580,7 @@ impl WhisperModel {
             WhisperModel::Small,
             WhisperModel::MediumEn,
             WhisperModel::Medium,
+            WhisperModel::LargeV3Turbo,
             WhisperModel::LargeV3,
         ]
     }

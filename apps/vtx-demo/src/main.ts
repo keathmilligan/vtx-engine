@@ -29,6 +29,13 @@ interface ModelStatus {
   path: string;
 }
 
+interface ModelStatusEntry {
+  model: string;
+  name: string;
+  size_mb: number;
+  downloaded: boolean;
+}
+
 interface GpuStatus {
   cuda_available: boolean;
   metal_available: boolean;
@@ -62,6 +69,7 @@ interface AgcConfig {
 
 /** Mirror of the Rust EngineConfig struct (snake_case matches serde output). */
 interface EngineConfig {
+  model: string;
   recording_mode: "mixed" | "echo_cancel";
   mic_gain_db: number;
   vad_voiced_threshold_db: number;
@@ -78,6 +86,7 @@ interface EngineConfig {
 }
 
 interface AppSettings {
+  model: string;
   transcriptionEnabled: boolean;
   autoTranscriptionEnabled: boolean;
   aecEnabled: boolean;
@@ -116,6 +125,7 @@ function loadSettings(): AppSettings {
 
 function defaultSettings(): AppSettings {
   return {
+    model: "base_en",
     transcriptionEnabled: true,
     autoTranscriptionEnabled: false,
     aecEnabled: false,
@@ -527,9 +537,23 @@ async function setupBackendListeners() {
     }
   });
 
-  // Model download progress
-  await listen<number>("model-download-progress", (event) => {
-    modelStatusEl.textContent = `Downloading model: ${event.payload}%`;
+  // Model download progress — handles both legacy engine events (plain number
+  // payload) and new config-panel events ({ model, progress } payload).
+  await listen<number | { model: string; progress: number }>("model-download-progress", (event) => {
+    if (typeof event.payload === "number") {
+      // Legacy engine download event (plain percent number)
+      modelStatusEl.textContent = `Downloading model: ${event.payload}%`;
+    } else {
+      // Config-panel model download event
+      const { model, progress } = event.payload;
+      downloadingModels.set(model, progress);
+      if (progress === 100) {
+        downloadingModels.delete(model);
+        fetchAndRenderModelList();
+      } else {
+        renderModelList();
+      }
+    }
   });
 
   await listen<boolean>("model-download-complete", (event) => {
@@ -542,6 +566,15 @@ async function setupBackendListeners() {
       modelStatusEl.textContent = "Download failed";
     }
   });
+
+  await listen<{ model: string; error: string }>(
+    "model-download-error",
+    (event) => {
+      downloadingModels.delete(event.payload.model);
+      modelErrors.set(event.payload.model, event.payload.error);
+      renderModelList();
+    }
+  );
 }
 
 // =============================================================================
@@ -838,17 +871,24 @@ async function checkModelStatus() {
     if (status.available) {
       modelStatusEl.textContent = "Model ready";
       btnDownloadModel.style.display = "none";
-      // Extract filename from path (strip directory and extension for display)
+    } else {
+      modelStatusEl.textContent = "Model not found";
+      btnDownloadModel.style.display = "inline-block";
+    }
+    // Display the model name from the current engine config
+    try {
+      const cfg = await invoke<EngineConfig>("get_engine_config");
+      const models = await invoke<ModelStatusEntry[]>("get_model_status");
+      const entry = models.find((m) => m.model === cfg.model);
+      modelNameEl.textContent = entry ? entry.name : cfg.model;
+      modelNameEl.className = "status-badge badge-model";
+    } catch {
+      // Fall back to parsing the path
       const parts = status.path.replace(/\\/g, "/").split("/");
       const filename = parts[parts.length - 1] ?? status.path;
       const modelName = filename.replace(/\.bin$/, "").replace(/^ggml-/, "");
       modelNameEl.textContent = modelName;
-      modelNameEl.title = status.path;
       modelNameEl.className = "status-badge badge-model";
-    } else {
-      modelStatusEl.textContent = "Model not found";
-      btnDownloadModel.style.display = "inline-block";
-      modelNameEl.textContent = "";
     }
   } catch (e) {
     console.error("Failed to check model status:", e);
@@ -1003,8 +1043,19 @@ const cfgOutputDevice = document.getElementById("cfg-output-device") as HTMLSele
 const cfgOutputSupported = document.getElementById("cfg-output-supported") as HTMLDivElement;
 const cfgOutputUnsupported = document.getElementById("cfg-output-unsupported") as HTMLDivElement;
 
+// Model
+const cfgModelList = document.getElementById("cfg-model-list") as HTMLDivElement;
+const cfgModelWarning = document.getElementById("cfg-model-warning") as HTMLDivElement;
+
+// Model state
+let modelStatus: ModelStatusEntry[] = [];
+let selectedModel: string = "base_en";
+let downloadingModels: Map<string, number> = new Map();
+let modelErrors: Map<string, string> = new Map();
+
 /** Populate form fields from an EngineConfig object. */
 function populateConfigForm(cfg: EngineConfig): void {
+  selectedModel = cfg.model;
   cfgMicGain.value = String(cfg.mic_gain_db);
   updateGainDisplay(cfg.mic_gain_db);
   // AGC
@@ -1030,6 +1081,7 @@ function populateConfigForm(cfg: EngineConfig): void {
 /** Read form fields and build an EngineConfig object. */
 function readConfigForm(): EngineConfig {
   return {
+    model: selectedModel,
     // recording_mode is controlled by the AEC toggle on the main UI, not the
     // config panel. Derive it from the current aecEnabled state so saving the
     // config panel never accidentally resets it.
@@ -1121,6 +1173,142 @@ async function populateOutputDevices(savedId: string): Promise<void> {
   }
 }
 
+/** Fetch model status from backend and render the model list. */
+async function fetchAndRenderModelList(): Promise<void> {
+  try {
+    modelStatus = await invoke<ModelStatusEntry[]>("get_model_status");
+    renderModelList();
+  } catch (e) {
+    console.error("Failed to get model status:", e);
+    cfgModelList.innerHTML = '<p class="config-note">Failed to load models</p>';
+  }
+}
+
+/** Render the model list UI. */
+function renderModelList(): void {
+  cfgModelList.innerHTML = "";
+
+  for (const entry of modelStatus) {
+    const row = document.createElement("div");
+    row.className = "config-model-row";
+    if (entry.model === selectedModel && entry.downloaded) {
+      row.classList.add("selected");
+    }
+
+    const isDownloading = downloadingModels.has(entry.model);
+    const error = modelErrors.get(entry.model);
+
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "model-select";
+    radio.className = "config-model-radio";
+    radio.checked = entry.model === selectedModel && entry.downloaded;
+    radio.disabled = !entry.downloaded || isDownloading;
+    radio.addEventListener("change", () => {
+      if (entry.downloaded) {
+        selectedModel = entry.model;
+        renderModelList();
+      }
+    });
+
+    const name = document.createElement("span");
+    name.className = "config-model-name";
+    name.textContent = entry.name;
+
+    const size = document.createElement("span");
+    size.className = "config-model-size";
+    size.textContent = entry.size_mb >= 1024
+      ? `${(entry.size_mb / 1024).toFixed(1)} GiB`
+      : `${entry.size_mb} MiB`;
+
+    const statusEl = document.createElement("span");
+    statusEl.className = "config-model-status";
+    if (isDownloading) {
+      statusEl.classList.add("downloading");
+      statusEl.textContent = `${downloadingModels.get(entry.model)}%`;
+    } else if (error) {
+      statusEl.classList.add("error");
+      statusEl.textContent = "Error";
+    } else if (entry.downloaded) {
+      statusEl.classList.add("downloaded");
+      statusEl.textContent = "Downloaded";
+    } else {
+      statusEl.classList.add("not-downloaded");
+      statusEl.textContent = "Not downloaded";
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "config-model-actions";
+
+    if (isDownloading) {
+      const progress = document.createElement("div");
+      progress.className = "config-model-progress";
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      fill.style.width = `${downloadingModels.get(entry.model)}%`;
+      progress.appendChild(fill);
+      actions.appendChild(progress);
+
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "config-model-btn cancel";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", () => cancelModelDownload(entry.model));
+      actions.appendChild(cancelBtn);
+    } else if (error) {
+      const errorEl = document.createElement("span");
+      errorEl.className = "config-model-error";
+      errorEl.textContent = error.length > 20 ? error.substring(0, 20) + "..." : error;
+      actions.appendChild(errorEl);
+
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "config-model-btn download";
+      retryBtn.textContent = "Retry";
+      retryBtn.addEventListener("click", () => startModelDownload(entry.model));
+      actions.appendChild(retryBtn);
+    } else if (!entry.downloaded) {
+      const downloadBtn = document.createElement("button");
+      downloadBtn.className = "config-model-btn download";
+      downloadBtn.textContent = "Download";
+      downloadBtn.addEventListener("click", () => startModelDownload(entry.model));
+      actions.appendChild(downloadBtn);
+    }
+
+    row.appendChild(radio);
+    row.appendChild(name);
+    row.appendChild(size);
+    row.appendChild(statusEl);
+    row.appendChild(actions);
+    cfgModelList.appendChild(row);
+  }
+}
+
+/** Start downloading a model. */
+async function startModelDownload(model: string): Promise<void> {
+  downloadingModels.set(model, 0);
+  modelErrors.delete(model);
+  renderModelList();
+
+  try {
+    await invoke("download_model_by_name", { model });
+  } catch (e) {
+    console.error("Failed to start download:", e);
+    downloadingModels.delete(model);
+    modelErrors.set(model, String(e));
+    renderModelList();
+  }
+}
+
+/** Cancel a model download. */
+async function cancelModelDownload(model: string): Promise<void> {
+  try {
+    await invoke("cancel_model_download", { model });
+    downloadingModels.delete(model);
+    renderModelList();
+  } catch (e) {
+    console.error("Failed to cancel download:", e);
+  }
+}
+
 let escapeListener: ((e: KeyboardEvent) => void) | null = null;
 
 /** Open the configuration panel. */
@@ -1136,12 +1324,16 @@ async function openConfigPanel(): Promise<void> {
     populateConfigForm(settingsToEngineConfig(s));
   }
 
+  // Fetch model status
+  await fetchAndRenderModelList();
+
   // Populate output devices
   const savedSettings = loadSettings();
   await populateOutputDevices(savedSettings.audioOutputDeviceId);
 
   // Show capture warning if active
   configCaptureWarning.style.display = isRecording ? "" : "none";
+  cfgModelWarning.style.display = isRecording ? "" : "none";
 
   // Show modal
   configBackdrop.style.display = "flex";
@@ -1187,6 +1379,7 @@ async function saveConfig(): Promise<void> {
   const s = loadSettings();
   const updated: AppSettings = {
     ...s,
+    model: cfg.model,
     micGainDb: cfg.mic_gain_db,
     agcEnabled: cfg.agc.enabled,
     agcTargetLevelDb: cfg.agc.target_level_db,
@@ -1204,6 +1397,14 @@ async function saveConfig(): Promise<void> {
     audioOutputDeviceId: cfgOutputDevice.value,
   };
   saveSettings(updated);
+
+  // Update model name badge in status bar
+  const modelEntry = modelStatus.find((m) => m.model === cfg.model);
+  if (modelEntry) {
+    modelNameEl.textContent = modelEntry.name;
+    modelNameEl.className = "status-badge badge-model";
+  }
+
   console.log("Calling closeConfigPanel");
   closeConfigPanel();
   console.log("closeConfigPanel called");
@@ -1220,6 +1421,7 @@ function resetToDefaults(): void {
 /** Convert AppSettings (camelCase) to EngineConfig (snake_case). */
 function settingsToEngineConfig(s: AppSettings): EngineConfig {
   return {
+    model: s.model,
     recording_mode: s.aecEnabled ? "echo_cancel" : "mixed",
     mic_gain_db: s.micGainDb,
     agc: {

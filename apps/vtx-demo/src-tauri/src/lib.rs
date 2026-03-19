@@ -3,17 +3,29 @@
 //! Provides a simple UI to test live audio capture, visualization, and
 //! WAV file transcription.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use vtx_engine::{AudioEngine, EngineBuilder};
+use vtx_engine::{AudioEngine, EngineBuilder, ModelManager, WhisperModel};
 use vtx_engine::*;
 
 /// Application state shared across Tauri commands.
 struct AppState {
     engine: Arc<Mutex<Option<AudioEngine>>>,
+    model_manager: ModelManager,
+    download_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+}
+
+/// Model status for a single WhisperModel variant.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ModelStatusEntry {
+    model: String,
+    name: String,
+    size_mb: u32,
+    downloaded: bool,
 }
 
 // =============================================================================
@@ -195,6 +207,87 @@ async fn set_engine_config(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_model_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ModelStatusEntry>, String> {
+    let manager = &state.model_manager;
+    let status: Vec<ModelStatusEntry> = WhisperModel::all_in_size_order()
+        .iter()
+        .map(|&model| ModelStatusEntry {
+            model: serde_json::to_string(&model).unwrap().trim_matches('"').to_string(),
+            name: model.display_name().to_string(),
+            size_mb: model.size_mb(),
+            downloaded: manager.is_available(model),
+        })
+        .collect();
+    Ok(status)
+}
+
+#[tauri::command]
+async fn download_model_by_name(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    model: String,
+) -> Result<(), String> {
+    let model: WhisperModel = serde_json::from_str(&format!("\"{}\"", model))
+        .map_err(|e| format!("Invalid model name: {}", e))?;
+    let model_key = serde_json::to_string(&model).unwrap().trim_matches('"').to_string();
+
+    let manager = state.model_manager.clone();
+    let handles = state.download_handles.clone();
+    let app_handle = app.clone();
+    let model_key_for_progress = model_key.clone();
+    let model_key_for_complete = model_key.clone();
+    let model_key_for_remove = model_key.clone();
+
+    let handle = tokio::spawn(async move {
+        let app_for_progress = app_handle.clone();
+        let model_for_progress = model_key_for_progress.clone();
+        let result = manager.download(model, move |progress| {
+            let _ = app_for_progress.emit("model-download-progress", serde_json::json!({
+                "model": model_for_progress,
+                "progress": progress
+            }));
+        }).await;
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle.emit("model-download-progress", serde_json::json!({
+                    "model": model_key_for_complete,
+                    "progress": 100
+                }));
+            }
+            Err(e) => {
+                let _ = app_handle.emit("model-download-error", serde_json::json!({
+                    "model": model_key_for_complete,
+                    "error": e.to_string()
+                }));
+            }
+        }
+
+        handles.lock().await.remove(&model_key_for_remove);
+    });
+
+    state.download_handles.lock().await.insert(model_key, handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_model_download(
+    state: tauri::State<'_, AppState>,
+    model: String,
+) -> Result<(), String> {
+    let model: WhisperModel = serde_json::from_str(&format!("\"{}\"", model))
+        .map_err(|e| format!("Invalid model name: {}", e))?;
+    let model_key = serde_json::to_string(&model).unwrap().trim_matches('"').to_string();
+
+    if let Some(handle) = state.download_handles.lock().await.remove(&model_key) {
+        handle.abort();
+    }
+    Ok(())
+}
+
 // =============================================================================
 // App Entry Point
 // =============================================================================
@@ -218,6 +311,8 @@ pub fn run() {
 
             let state = AppState {
                 engine: Arc::new(Mutex::new(None)),
+                model_manager: ModelManager::new("vtx-engine"),
+                download_handles: Arc::new(Mutex::new(HashMap::new())),
             };
 
             let engine_arc = state.engine.clone();
@@ -316,6 +411,9 @@ pub fn run() {
             set_engine_config,
             set_ptt_mode,
             finalize_segment,
+            get_model_status,
+            download_model_by_name,
+            cancel_model_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");
