@@ -45,8 +45,22 @@ When the configuration panel is opened, it SHALL fetch the current `EngineConfig
 - **WHEN** the user opens the panel, closes it, and opens it again
 - **THEN** the fields reflect the most recently saved config values, not stale cached values
 
+### Requirement: Configuration panel includes Model section as first section
+The configuration panel SHALL include a Model section positioned before the Audio Input section. The Model section SHALL display all available `WhisperModel` variants with their download status and allow model selection and downloading.
+
+#### Scenario: Model section appears before Audio Input
+- **WHEN** the configuration panel is opened
+- **THEN** the Model section is visible as the first section
+- **THEN** the Audio Input section appears after the Model section
+
+#### Scenario: Model section fetches status on panel open
+- **WHEN** the configuration panel is opened
+- **THEN** `get_model_status` is invoked to populate the model list
+- **THEN** the current `EngineConfig.model` is shown as selected
+
 ### Requirement: Configuration panel groups settings into labeled sections
 The panel SHALL organize settings into the following labeled sections:
+- **Model**: model selection with download status and actions (positioned first)
 - **Audio Input**: mic gain (dB slider, range -20 to +20, default 0.0); AGC enable toggle (checkbox); AGC target level (dB slider, range -40 to 0, default -18.0)
 - **Voice Detection**: voiced threshold (dB), whisper threshold (dB), voiced onset (ms), whisper onset (ms)
 - **Segmentation**: segment max duration (ms), word-break grace period (ms), lookback (ms), word-break segmentation toggle (checkbox), transcription queue capacity

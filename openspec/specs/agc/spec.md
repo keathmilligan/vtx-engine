@@ -15,14 +15,20 @@ TBD — Specification for the Automatic Gain Control (AGC) subsystem in vtx-engi
 | `release_time_ms` | `f32` | `200.0` | Gain increase time constant in milliseconds |
 | `min_gain_db` | `f32` | `-6.0` | Minimum allowable AGC gain in dB |
 | `max_gain_db` | `f32` | `30.0` | Maximum allowable AGC gain in dB |
+| `gate_threshold_db` | `f32` | `-50.0` | Power level in dBFS below which the AGC decays gain toward unity instead of boosting |
 
 #### Scenario: AgcConfig defaults to disabled
 - **WHEN** `AgcConfig::default()` is called
-- **THEN** `enabled` is `false` and all other fields match the documented defaults
+- **THEN** `enabled` is `false` and all other fields match the documented defaults, including `gate_threshold_db` at `-50.0`
 
 #### Scenario: AgcConfig round-trips through serde
-- **WHEN** an `AgcConfig` with non-default values is serialized to TOML and deserialized
+- **WHEN** an `AgcConfig` with non-default values (including `gate_threshold_db`) is serialized to TOML and deserialized
 - **THEN** the deserialized value equals the original
+
+#### Scenario: Existing config without gate_threshold_db deserializes with default
+- **WHEN** a TOML file contains an `[agc]` section without a `gate_threshold_db` key
+- **THEN** `gate_threshold_db` defaults to `-50.0`
+- **THEN** no error is returned
 
 ### Requirement: AgcConfig is embedded in EngineConfig
 `EngineConfig` SHALL contain a field `pub agc: AgcConfig` annotated with `#[serde(default)]`. When absent from a TOML config file, it SHALL deserialize to `AgcConfig::default()` (AGC disabled).
@@ -44,11 +50,14 @@ TBD — Specification for the Automatic Gain Control (AGC) subsystem in vtx-engi
    - If `chunk_power > power_estimate`: use `α_attack = exp(-chunk_duration_s / (attack_time_s))`
    - Otherwise: use `α_release = exp(-chunk_duration_s / (release_time_s))`
 3. Update: `power_estimate = α * power_estimate + (1 - α) * chunk_power`.
-4. Compute gain: `gain = target_rms / sqrt(power_estimate).clamp(min_gain_linear, max_gain_linear)`.
+4. Determine the gain behavior based on the power estimate:
+   - If `power_estimate > gate_threshold_power`: compute gain normally as `gain = target_rms / sqrt(power_estimate)`, clamped to `[min_gain_linear, max_gain_linear]`.
+   - If `power_estimate` is between the noise floor (`1e-10`) and `gate_threshold_power`: decay `current_gain_linear` toward `1.0` (unity) using an exponential decay with a fixed time constant of `500 ms`.
+   - If `power_estimate <= 1e-10` (digital silence): hold the current gain unchanged.
 5. Apply gain in-place: `s = (s * gain).clamp(-1.0, 1.0)` for each sample.
 6. Store the current gain for observation via `current_gain_db() -> f32`.
 
-When `power_estimate` is below a noise floor threshold (`1e-10`), no gain adjustment SHALL be applied to prevent amplifying silence.
+The `gate_threshold_power` SHALL be derived from `AgcConfig::gate_threshold_db` as `10^(gate_threshold_db / 10)`.
 
 #### Scenario: Unity gain on a signal already at target level
 - **WHEN** `AgcProcessor` is fed a sine wave with RMS equal to the target RMS level for several chunks
@@ -69,6 +78,21 @@ When `power_estimate` is below a noise floor threshold (`1e-10`), no gain adjust
 #### Scenario: Silence does not cause gain explosion
 - **WHEN** `AgcProcessor` receives chunks of all-zero samples
 - **THEN** `current_gain_db()` does not exceed `max_gain_db` and no NaN or infinity is produced
+
+#### Scenario: Noise below gate threshold does not get amplified
+- **WHEN** `AgcProcessor` is processing speech and the input transitions to low-level noise below `gate_threshold_db`
+- **THEN** the AGC decays its gain toward unity (0 dB) instead of boosting the noise toward the target level
+- **THEN** the noise passes through at approximately its natural level
+
+#### Scenario: Gain decays smoothly during gate region
+- **WHEN** `AgcProcessor` had been amplifying speech at +20 dB gain and the input drops to noise below the gate threshold
+- **THEN** the gain decays from +20 dB toward 0 dB over approximately 1-2 seconds (500 ms time constant)
+- **THEN** no abrupt gain changes or audible discontinuities occur
+
+#### Scenario: Speech resumption after gate decay re-engages AGC normally
+- **WHEN** the AGC gain has decayed toward unity during a noise period and speech resumes above the gate threshold
+- **THEN** the AGC computes gain normally using the envelope follower
+- **THEN** the transition from gate-decay to active AGC is smooth
 
 ### Requirement: AGC stage is applied in the capture loop after manual gain
 The capture loop in `AudioEngine` SHALL apply the AGC stage on the mono samples **after** the `mic_gain_db` manual gain stage and **before** the VAD and visualization stages. The AGC stage SHALL be skipped entirely (no processing cost) when `AgcConfig::enabled` is `false`.
