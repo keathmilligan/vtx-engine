@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (vX.Y.Z format)'
+        required: true
+        type: string
+      force:
+        description: 'Skip validation and allow re-releasing existing version'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        id: validate-format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format: $VERSION (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Check tag does not exist
+        if: inputs.force != true
+        run: |
+          TAG="${{ steps.validate-format.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists. Use force=true to re-release."
+            exit 1
+          fi
+
+      - name: Delete existing tag (force mode)
+        if: inputs.force == true
+        run: |
+          TAG="${{ steps.validate-format.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Deleting existing tag $TAG..."
+            git tag -d "$TAG" || true
+            git push origin --delete "$TAG" || true
+          fi
+
+      - name: Validate version increment
+        if: inputs.force != true
+        run: |
+          NEW_TAG="${{ steps.validate-format.outputs.version }}"
+          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "No previous tags found — treating as first release."
+            exit 0
+          fi
+          
+          echo "Latest tag: $LATEST_TAG"
+          echo "New tag: $NEW_TAG"
+          
+          parse_semver() {
+            local v="${1#v}"
+            if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+            fi
+          }
+          
+          semver_gt() {
+            local a_maj a_min a_pat b_maj b_min b_pat
+            read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
+            read -r b_maj b_min b_pat <<< "$(parse_semver "$2")"
+            
+            if (( a_maj > b_maj )); then return 0
+            elif (( a_maj < b_maj )); then return 1
+            elif (( a_min > b_min )); then return 0
+            elif (( a_min < b_min )); then return 1
+            elif (( a_pat > b_pat )); then return 0
+            else return 1
+            fi
+          }
+          
+          is_valid_increment() {
+            local a_maj a_min a_pat b_maj b_min b_pat
+            read -r a_maj a_min a_pat <<< "$(parse_semver "$1")"
+            read -r b_maj b_min b_pat <<< "$(parse_semver "$2")"
+            
+            if (( a_maj == b_maj && a_min == b_min )); then
+              (( a_pat > b_pat )) && return 0
+            elif (( a_maj == b_maj && a_min > b_min )); then
+              (( a_pat == 0 )) && return 0
+            elif (( a_maj > b_maj )); then
+              (( a_min == 0 && a_pat == 0 )) && return 0
+            fi
+            return 1
+          }
+          
+          if ! semver_gt "$NEW_TAG" "$LATEST_TAG"; then
+            echo "::error::$NEW_TAG is not greater than $LATEST_TAG"
+            exit 1
+          fi
+          
+          if ! is_valid_increment "$NEW_TAG" "$LATEST_TAG"; then
+            echo "::error::$NEW_TAG is not a valid increment of $LATEST_TAG"
+            exit 1
+          fi
+
+      - name: Update version in Cargo.toml
+        run: |
+          VERSION="${{ steps.validate-format.outputs.version_number }}"
+          sed -i "0,/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/s//version = \"$VERSION\"/" Cargo.toml
+          UPDATED=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [[ "$UPDATED" != "$VERSION" ]]; then
+            echo "::error::Failed to update version in Cargo.toml (got '$UPDATED')"
+            exit 1
+          fi
+          echo "Updated Cargo.toml to $VERSION"
+
+      - name: Update version in package.json files
+        run: |
+          VERSION="${{ steps.validate-format.outputs.version_number }}"
+          
+          update_json_version() {
+            local file="$1"
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+              if (!('version' in data)) {
+                console.error('error: no version field in ' + process.argv[1]);
+                process.exit(1);
+              }
+              data.version = process.argv[2];
+              fs.writeFileSync(process.argv[1], JSON.stringify(data, null, 2) + '\n');
+            " "$file" "$VERSION"
+            echo "Updated $file"
+          }
+          
+          update_json_version "packages/vtx-viz/package.json"
+          update_json_version "apps/vtx-demo/package.json"
+          update_json_version "apps/vtx-demo/src-tauri/tauri.conf.json"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync Cargo.lock
+        run: cargo update --workspace
+
+      - name: Commit version bump
+        run: |
+          TAG="${{ steps.validate-format.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            Cargo.toml \
+            Cargo.lock \
+            packages/vtx-viz/package.json \
+            apps/vtx-demo/package.json \
+            apps/vtx-demo/src-tauri/tauri.conf.json
+          git commit -m "chore: release $TAG"
+
+      - name: Push commit and tag
+        run: |
+          TAG="${{ steps.validate-format.outputs.version }}"
+          git push origin HEAD:main
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Summary
+        run: |
+          TAG="${{ steps.validate-format.outputs.version }}"
+          FORCE="${{ inputs.force }}"
+          echo "## Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: **$TAG**" >> $GITHUB_STEP_SUMMARY
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Mode: **Force** (validation skipped, existing tag replaced)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The publish workflow will now run automatically to publish to crates.io and create a GitHub release." >> $GITHUB_STEP_SUMMARY

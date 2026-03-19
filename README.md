@@ -2,6 +2,10 @@ https://github.com/user-attachments/assets/1182e5c8-c51f-414a-bd21-2957388f5f1e
 
 # vtx-engine
 
+[![CI](https://github.com/anomalyco/vtx-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/anomalyco/vtx-engine/actions/workflows/ci.yml)
+[![Publish](https://github.com/anomalyco/vtx-engine/actions/workflows/publish.yml/badge.svg)](https://github.com/anomalyco/vtx-engine/actions/workflows/publish.yml)
+[![Release](https://github.com/anomalyco/vtx-engine/actions/workflows/release.yml/badge.svg)](https://github.com/anomalyco/vtx-engine/actions/workflows/release.yml)
+
 A reusable voice processing and transcription library built in Rust.
 
 Provides platform-native audio capture, real-time speech detection, audio visualization, and Whisper-based transcription as composable libraries. Supports Windows, Linux, and macOS.
