@@ -20,6 +20,7 @@ Provides platform-native audio capture, real-time speech detection, audio visual
 - **GPU acceleration** — CUDA on Windows, Metal on macOS
 - **Flexible input** — Live microphone capture, manual recording (up to 30 min), file playback, and raw audio stream transcription
 - **Visualization data** — Waveform, FFT spectrogram, and per-frame speech activity metrics
+- **Audio data streaming** — Opt-in real-time streaming of processed and/or raw audio samples with sample-accurate timing for A/V synchronization
 - **Model management** — Async download of all Whisper ggml model variants with progress callbacks
 - **Config & history** — TOML-based config persistence and bounded transcription history with WAV cleanup
 

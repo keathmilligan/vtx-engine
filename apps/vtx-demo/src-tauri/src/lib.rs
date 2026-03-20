@@ -375,6 +375,12 @@ pub fn run() {
                                 EngineEvent::AgcGainChanged(gain_db) => {
                                     let _ = ah.emit("agc-gain-changed", gain_db);
                                 }
+                                EngineEvent::AudioData(data) => {
+                                    let _ = ah.emit("audio-data", data);
+                                }
+                                EngineEvent::RawAudioData(data) => {
+                                    let _ = ah.emit("raw-audio-data", data);
+                                }
                             }
                         }).spawn();
 

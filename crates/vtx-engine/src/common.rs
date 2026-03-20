@@ -55,6 +55,24 @@ pub struct AudioData {
     pub sample_rate: u32,
 }
 
+/// Audio sample chunk delivered via the broadcast event channel.
+///
+/// Used by both [`EngineEvent::AudioData`] (processed) and
+/// [`EngineEvent::RawAudioData`] (raw) variants.  The `sample_offset` field
+/// provides sample-accurate timing: `sample_offset / sample_rate` gives the
+/// chunk timestamp in seconds relative to the start of the capture session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingAudioData {
+    /// Mono audio samples (f32, -1.0 to 1.0).
+    pub samples: Vec<f32>,
+    /// Sample rate in Hz (e.g. 48000).
+    pub sample_rate: u32,
+    /// Cumulative number of samples emitted for this stream since the capture
+    /// session began, not counting the samples in this event.  The first event
+    /// of a session has `sample_offset = 0`.
+    pub sample_offset: u64,
+}
+
 // =============================================================================
 // Hotkey Types
 // =============================================================================
@@ -782,4 +800,163 @@ pub enum EngineEvent {
     ///
     /// The `f32` value is the instantaneous AGC gain in dB at the time of emission.
     AgcGainChanged(f32),
+    /// Processed audio data (post-gain, post-AGC).  Emitted for every audio
+    /// chunk when audio streaming is enabled via
+    /// [`EngineBuilder::with_audio_streaming`](crate::EngineBuilder::with_audio_streaming).
+    AudioData(StreamingAudioData),
+    /// Raw audio data (post-mono-conversion, pre-gain, pre-AGC).  Emitted for
+    /// every audio chunk when raw audio streaming is enabled via
+    /// [`EngineBuilder::with_raw_audio_streaming`](crate::EngineBuilder::with_raw_audio_streaming).
+    RawAudioData(StreamingAudioData),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_audio_data_fields() {
+        let data = StreamingAudioData {
+            samples: vec![0.1, -0.5, 1.0],
+            sample_rate: 48000,
+            sample_offset: 96000,
+        };
+        assert_eq!(data.samples.len(), 3);
+        assert_eq!(data.sample_rate, 48000);
+        assert_eq!(data.sample_offset, 96000);
+    }
+
+    #[test]
+    fn streaming_audio_data_clone() {
+        let data = StreamingAudioData {
+            samples: vec![0.25, -0.75],
+            sample_rate: 48000,
+            sample_offset: 0,
+        };
+        let cloned = data.clone();
+        assert_eq!(cloned.samples, data.samples);
+        assert_eq!(cloned.sample_rate, data.sample_rate);
+        assert_eq!(cloned.sample_offset, data.sample_offset);
+    }
+
+    #[test]
+    fn streaming_audio_data_serialization_round_trip() {
+        let data = StreamingAudioData {
+            samples: vec![0.0, 0.5, -0.5, 1.0, -1.0],
+            sample_rate: 48000,
+            sample_offset: 480000,
+        };
+        let json = serde_json::to_string(&data).expect("serialize");
+        let deserialized: StreamingAudioData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.samples, data.samples);
+        assert_eq!(deserialized.sample_rate, data.sample_rate);
+        assert_eq!(deserialized.sample_offset, data.sample_offset);
+    }
+
+    #[test]
+    fn engine_event_audio_data_variant_matches() {
+        let event = EngineEvent::AudioData(StreamingAudioData {
+            samples: vec![0.1],
+            sample_rate: 48000,
+            sample_offset: 0,
+        });
+        match &event {
+            EngineEvent::AudioData(data) => {
+                assert_eq!(data.samples, vec![0.1]);
+                assert_eq!(data.sample_rate, 48000);
+                assert_eq!(data.sample_offset, 0);
+            }
+            _ => panic!("expected AudioData variant"),
+        }
+    }
+
+    #[test]
+    fn engine_event_raw_audio_data_variant_matches() {
+        let event = EngineEvent::RawAudioData(StreamingAudioData {
+            samples: vec![-0.3, 0.7],
+            sample_rate: 48000,
+            sample_offset: 960,
+        });
+        match &event {
+            EngineEvent::RawAudioData(data) => {
+                assert_eq!(data.samples, vec![-0.3, 0.7]);
+                assert_eq!(data.sample_rate, 48000);
+                assert_eq!(data.sample_offset, 960);
+            }
+            _ => panic!("expected RawAudioData variant"),
+        }
+    }
+
+    #[test]
+    fn engine_event_audio_data_serialization() {
+        let event = EngineEvent::AudioData(StreamingAudioData {
+            samples: vec![0.5],
+            sample_rate: 48000,
+            sample_offset: 0,
+        });
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"audio_data\""));
+        assert!(json.contains("\"sample_rate\":48000"));
+        assert!(json.contains("\"sample_offset\":0"));
+    }
+
+    #[test]
+    fn engine_event_raw_audio_data_serialization() {
+        let event = EngineEvent::RawAudioData(StreamingAudioData {
+            samples: vec![-0.25],
+            sample_rate: 48000,
+            sample_offset: 480,
+        });
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"raw_audio_data\""));
+        assert!(json.contains("\"sample_rate\":48000"));
+        assert!(json.contains("\"sample_offset\":480"));
+    }
+
+    #[test]
+    fn streaming_audio_data_timestamp_computation() {
+        // Verify the documented formula: timestamp_seconds = sample_offset / sample_rate
+        let data = StreamingAudioData {
+            samples: vec![0.0; 480],
+            sample_rate: 48000,
+            sample_offset: 480000,
+        };
+        let timestamp_seconds = data.sample_offset as f64 / data.sample_rate as f64;
+        assert!(
+            (timestamp_seconds - 10.0).abs() < 1e-9,
+            "expected 10.0s, got {}",
+            timestamp_seconds
+        );
+    }
+
+    #[test]
+    fn streaming_audio_data_first_chunk_offset_zero() {
+        let data = StreamingAudioData {
+            samples: vec![0.0; 480],
+            sample_rate: 48000,
+            sample_offset: 0,
+        };
+        let timestamp_seconds = data.sample_offset as f64 / data.sample_rate as f64;
+        assert_eq!(timestamp_seconds, 0.0);
+    }
+
+    #[test]
+    fn streaming_audio_data_offset_increment() {
+        // Simulate two consecutive chunks and verify offset semantics
+        let chunk1 = StreamingAudioData {
+            samples: vec![0.0; 480],
+            sample_rate: 48000,
+            sample_offset: 0,
+        };
+        let next_offset = chunk1.sample_offset + chunk1.samples.len() as u64;
+        let chunk2 = StreamingAudioData {
+            samples: vec![0.0; 480],
+            sample_rate: 48000,
+            sample_offset: next_offset,
+        };
+        assert_eq!(chunk2.sample_offset, 480);
+        // Third chunk
+        let next_offset2 = chunk2.sample_offset + chunk2.samples.len() as u64;
+        assert_eq!(next_offset2, 960);
+    }
 }

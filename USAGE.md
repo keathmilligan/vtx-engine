@@ -14,10 +14,11 @@ This guide covers the primary integration patterns for vtx-engine:
 8. **Transcription History** — recording and managing a persistent history of transcription results.
 9. **Subsystem Configuration** — disabling unused subsystems at build time.
 10. **Device Testing** — testing audio input levels before starting a capture session.
+11. **Audio Data Streaming** — real-time streaming of processed and/or raw audio samples for A/V muxing or custom processing.
 
 **TypeScript visualization (`@vtx-engine/viz`)**
 
-11. **Speech Activity Renderer** — scrollable canvas widget showing VAD state, signal metrics, and segment markers with full history scrollback.
+12. **Speech Activity Renderer** — scrollable canvas widget showing VAD state, signal metrics, and segment markers with full history scrollback.
 
 ---
 
@@ -548,6 +549,8 @@ let (engine, mut rx) = EngineBuilder::new()
 | `without_transcription()` | No `TranscriptionComplete` or `TranscriptionSegment` events; whisper.cpp not loaded |
 | `without_visualization()` | No `VisualizationData` events |
 | `without_vad()` | No `SpeechStarted`/`SpeechEnded` events from VAD; manual recording still works |
+| `with_audio_streaming()` | Emit `AudioData` events with processed mono samples (post-gain, post-AGC) |
+| `with_raw_audio_streaming()` | Emit `RawAudioData` events with raw mono samples (pre-gain, pre-AGC) |
 
 ---
 
@@ -587,6 +590,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+## Audio Data Streaming
+
+Stream real-time audio samples from the engine's capture pipeline to your
+application via the broadcast event channel. Two independent streams are
+available:
+
+- **Processed audio** (`AudioData`) — mono f32 samples after mic-gain and AGC
+- **Raw audio** (`RawAudioData`) — mono f32 samples before mic-gain and AGC
+
+Both are opt-in and disabled by default.
+
+### Enabling audio streaming
+
+```rust
+use vtx_engine::{EngineBuilder, EngineEvent, StreamingAudioData};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Enable processed audio streaming (or use with_raw_audio_streaming(),
+    // or both)
+    let (engine, mut rx) = EngineBuilder::new()
+        .with_audio_streaming()
+        .without_transcription()
+        .without_visualization()
+        .build()
+        .await?;
+
+    let devices = engine.list_input_devices();
+    engine.start_capture(devices.first().map(|d| d.id.clone()), None).await?;
+
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                EngineEvent::AudioData(data) => {
+                    println!(
+                        "chunk: {} samples @ {}Hz, offset={}",
+                        data.samples.len(),
+                        data.sample_rate,
+                        data.sample_offset,
+                    );
+                }
+                _ => {}
+            }
+        }
+    });
+
+    tokio::signal::ctrl_c().await?;
+    engine.stop_capture().await?;
+    Ok(())
+}
+```
+
+### Choosing between processed and raw streams
+
+| Stream | Builder method | Event variant | Samples |
+|---|---|---|---|
+| Processed | `with_audio_streaming()` | `AudioData` | After mic-gain and AGC — matches what the user hears |
+| Raw | `with_raw_audio_streaming()` | `RawAudioData` | Before mic-gain and AGC — unmodified capture data |
+
+Enable both simultaneously to receive two independent streams from the same
+audio source:
+
+```rust
+let (engine, mut rx) = EngineBuilder::new()
+    .with_audio_streaming()
+    .with_raw_audio_streaming()
+    .build()
+    .await?;
+```
+
+### A/V synchronization
+
+Each audio chunk carries a `sample_offset` field — a cumulative count of
+samples emitted since capture started (starting at 0). Compute the chunk
+timestamp with:
+
+```
+timestamp_seconds = sample_offset / sample_rate
+```
+
+**Sync workflow for video recording apps:**
+
+1. Observe `CaptureStateChanged { capturing: true }` — this is T=0 for the
+   audio timeline.
+2. Receive `AudioData` (or `RawAudioData`) events — each chunk's position is
+   `sample_offset / sample_rate` seconds from T=0.
+3. In your own video pipeline, record the wall-clock time of the first video
+   frame relative to T=0.
+4. Apply the delta as an A/V offset when muxing.
+
+When both streams are enabled, `AudioData` and `RawAudioData` events for the
+same audio chunk carry identical `sample_offset` values, allowing correlation.
+
+### Audio format
+
+| Property | Value |
+|---|---|
+| Sample rate | 48 000 Hz |
+| Channels | 1 (mono) |
+| Sample format | f32, range -1.0 to 1.0 |
 
 ---
 
@@ -680,6 +786,8 @@ All fields can be set via `EngineBuilder` setters or by constructing `EngineConf
 | `without_transcription()` | Disable transcription subsystem |
 | `without_visualization()` | Disable visualization subsystem |
 | `without_vad()` | Disable VAD subsystem |
+| `with_audio_streaming()` | Enable processed audio data streaming (`AudioData` events) |
+| `with_raw_audio_streaming()` | Enable raw audio data streaming (`RawAudioData` events) |
 
 ---
 

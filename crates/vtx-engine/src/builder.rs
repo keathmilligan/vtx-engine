@@ -54,6 +54,8 @@ pub struct EngineBuilder {
     transcription_enabled: bool,
     visualization_enabled: bool,
     vad_enabled: bool,
+    audio_streaming_enabled: bool,
+    raw_audio_streaming_enabled: bool,
 }
 
 impl EngineBuilder {
@@ -65,6 +67,8 @@ impl EngineBuilder {
             transcription_enabled: true,
             visualization_enabled: true,
             vad_enabled: true,
+            audio_streaming_enabled: false,
+            raw_audio_streaming_enabled: false,
         }
     }
 
@@ -76,6 +80,8 @@ impl EngineBuilder {
             transcription_enabled: true,
             visualization_enabled: true,
             vad_enabled: true,
+            audio_streaming_enabled: false,
+            raw_audio_streaming_enabled: false,
         }
     }
 
@@ -249,6 +255,29 @@ impl EngineBuilder {
         self
     }
 
+    /// Enable streaming of processed audio data.  When enabled, the engine
+    /// emits [`EngineEvent::AudioData`](crate::EngineEvent::AudioData) events
+    /// for every audio chunk during live capture.  The samples are mono f32
+    /// PCM after mic-gain and AGC processing.
+    ///
+    /// Disabled by default.
+    pub fn with_audio_streaming(mut self) -> Self {
+        self.audio_streaming_enabled = true;
+        self
+    }
+
+    /// Enable streaming of raw (unprocessed) audio data.  When enabled, the
+    /// engine emits [`EngineEvent::RawAudioData`](crate::EngineEvent::RawAudioData)
+    /// events for every audio chunk during live capture.  The samples are mono
+    /// f32 PCM immediately after channel down-mix, before mic-gain and AGC.
+    ///
+    /// Disabled by default.  Can be combined with [`with_audio_streaming`](Self::with_audio_streaming)
+    /// to receive both processed and raw streams independently.
+    pub fn with_raw_audio_streaming(mut self) -> Self {
+        self.raw_audio_streaming_enabled = true;
+        self
+    }
+
     // -------------------------------------------------------------------------
     // Build
     // -------------------------------------------------------------------------
@@ -320,6 +349,8 @@ impl EngineBuilder {
             transcription_enabled: Arc::new(AtomicBool::new(self.transcription_enabled)),
             vad_enabled: self.vad_enabled,
             visualization_enabled: self.visualization_enabled,
+            audio_streaming_enabled: self.audio_streaming_enabled,
+            raw_audio_streaming_enabled: self.raw_audio_streaming_enabled,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             recording_active: Arc::new(AtomicBool::new(false)),
             recording_start: Arc::new(std::sync::Mutex::new(None)),
@@ -340,5 +371,73 @@ impl EngineBuilder {
 impl Default for EngineBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_streaming_disabled_by_default() {
+        let builder = EngineBuilder::new();
+        assert!(!builder.audio_streaming_enabled);
+        assert!(!builder.raw_audio_streaming_enabled);
+    }
+
+    #[test]
+    fn audio_streaming_disabled_by_default_from_config() {
+        let builder = EngineBuilder::from_config(crate::EngineConfig::default());
+        assert!(!builder.audio_streaming_enabled);
+        assert!(!builder.raw_audio_streaming_enabled);
+    }
+
+    #[test]
+    fn with_audio_streaming_enables_processed() {
+        let builder = EngineBuilder::new().with_audio_streaming();
+        assert!(builder.audio_streaming_enabled);
+        assert!(!builder.raw_audio_streaming_enabled);
+    }
+
+    #[test]
+    fn with_raw_audio_streaming_enables_raw() {
+        let builder = EngineBuilder::new().with_raw_audio_streaming();
+        assert!(!builder.audio_streaming_enabled);
+        assert!(builder.raw_audio_streaming_enabled);
+    }
+
+    #[test]
+    fn both_streams_enabled_independently() {
+        let builder = EngineBuilder::new()
+            .with_audio_streaming()
+            .with_raw_audio_streaming();
+        assert!(builder.audio_streaming_enabled);
+        assert!(builder.raw_audio_streaming_enabled);
+    }
+
+    #[test]
+    fn audio_streaming_combines_with_subsystem_toggles() {
+        let builder = EngineBuilder::new()
+            .with_audio_streaming()
+            .with_raw_audio_streaming()
+            .without_transcription()
+            .without_visualization();
+        assert!(builder.audio_streaming_enabled);
+        assert!(builder.raw_audio_streaming_enabled);
+        assert!(!builder.transcription_enabled);
+        assert!(!builder.visualization_enabled);
+    }
+
+    #[test]
+    fn builder_method_chaining_order_independent() {
+        // Verify order doesn't matter
+        let b1 = EngineBuilder::new()
+            .with_raw_audio_streaming()
+            .with_audio_streaming();
+        let b2 = EngineBuilder::new()
+            .with_audio_streaming()
+            .with_raw_audio_streaming();
+        assert_eq!(b1.audio_streaming_enabled, b2.audio_streaming_enabled);
+        assert_eq!(b1.raw_audio_streaming_enabled, b2.raw_audio_streaming_enabled);
     }
 }

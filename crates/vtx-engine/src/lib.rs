@@ -345,6 +345,10 @@ pub struct AudioEngine {
     vad_enabled: bool,
     /// Whether visualization subsystem is enabled
     visualization_enabled: bool,
+    /// Whether processed audio streaming is enabled
+    audio_streaming_enabled: bool,
+    /// Whether raw audio streaming is enabled
+    raw_audio_streaming_enabled: bool,
     /// Global shutdown flag
     shutdown_flag: Arc<AtomicBool>,
     /// Whether a manual recording session is active
@@ -803,6 +807,8 @@ impl AudioEngine {
         let transcription_enabled = self.transcription_enabled.clone();
         let vad_enabled = self.vad_enabled;
         let visualization_enabled = self.visualization_enabled;
+        let audio_streaming_enabled = self.audio_streaming_enabled;
+        let raw_audio_streaming_enabled = self.raw_audio_streaming_enabled;
         let recording_active = self.recording_active.clone();
         let playback_active_loop = self.playback_active.clone();
         let ptt_mode = self.ptt_mode.clone();
@@ -828,6 +834,9 @@ impl AudioEngine {
                 .unwrap_or_default();
             let mut agc_processor = processor::AgcProcessor::new(initial_agc_config);
 
+            // Cumulative sample counter for audio streaming events.
+            let mut audio_stream_sample_offset: u64 = 0;
+
             loop {
                 if !loop_active.load(Ordering::SeqCst) || shutdown_flag.load(Ordering::SeqCst) {
                     break;
@@ -842,6 +851,15 @@ impl AudioEngine {
                     // Mix down to mono.  This copy is kept unmodified as the
                     // "raw" mono snapshot used for the raw WAV accumulation buffer.
                     let raw_mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+
+                    // --- Raw audio streaming (pre-processing) ---
+                    if raw_audio_streaming_enabled {
+                        let _ = sender.send(EngineEvent::RawAudioData(StreamingAudioData {
+                            samples: raw_mono_samples.clone(),
+                            sample_rate,
+                            sample_offset: audio_stream_sample_offset,
+                        }));
+                    }
 
                     // `processed_samples` starts as a copy of `raw_mono_samples` and is
                     // then mutated in-place by every processing stage.  It is kept
@@ -888,6 +906,15 @@ impl AudioEngine {
                         }
                     }
 
+                    // --- Processed audio streaming (post-processing) ---
+                    if audio_streaming_enabled {
+                        let _ = sender.send(EngineEvent::AudioData(StreamingAudioData {
+                            samples: processed_samples.clone(),
+                            sample_rate,
+                            sample_offset: audio_stream_sample_offset,
+                        }));
+                    }
+
                     // --- Render output (during file playback) ---
                     if playback_active_loop.load(Ordering::Relaxed) {
                         if let Ok(guard) = render_tx_shared.try_lock() {
@@ -897,6 +924,11 @@ impl AudioEngine {
                                 let _ = tx.try_send(processed_samples.clone());
                             }
                         }
+                    }
+
+                    // --- Audio stream sample offset ---
+                    if audio_streaming_enabled || raw_audio_streaming_enabled {
+                        audio_stream_sample_offset += raw_mono_samples.len() as u64;
                     }
 
                     // --- Speech state changes (VAD) ---
@@ -1486,5 +1518,92 @@ mod tests {
         // A large input should be clamped to exactly ±1.0
         assert_eq!(clamped[2], 1.0);
         assert_eq!(clamped[3], -1.0);
+    }
+
+    /// Audio stream sample offset tracks cumulative chunk sizes correctly.
+    #[test]
+    fn audio_stream_sample_offset_accumulation() {
+        // Simulate the offset counter logic from the audio loop
+        let mut offset: u64 = 0;
+        let chunk_sizes: Vec<usize> = vec![480, 480, 960, 240, 480];
+
+        let mut offsets = Vec::new();
+        for chunk_size in &chunk_sizes {
+            offsets.push(offset);
+            offset += *chunk_size as u64;
+        }
+
+        assert_eq!(offsets, vec![0, 480, 960, 1920, 2160]);
+        assert_eq!(offset, 2640); // total samples after all chunks
+    }
+
+    /// Verify the sample_offset → timestamp conversion formula.
+    #[test]
+    fn audio_stream_offset_to_timestamp() {
+        let sample_rate: u32 = 48000;
+
+        // 0 offset = 0.0 seconds
+        assert_eq!(0u64 as f64 / sample_rate as f64, 0.0);
+
+        // 48000 samples = 1.0 second
+        assert!((48000u64 as f64 / sample_rate as f64 - 1.0).abs() < 1e-9);
+
+        // 480000 samples = 10.0 seconds
+        assert!((480000u64 as f64 / sample_rate as f64 - 10.0).abs() < 1e-9);
+
+        // 144000000 samples = 3000.0 seconds (50 minutes)
+        assert!((144_000_000u64 as f64 / sample_rate as f64 - 3000.0).abs() < 1e-9);
+    }
+
+    /// Both streams (processed + raw) share the same offset sequence when
+    /// derived from the same chunk.
+    #[test]
+    fn audio_stream_shared_offset_sequence() {
+        use crate::StreamingAudioData;
+
+        let mut offset: u64 = 0;
+        let chunk = vec![0.1f32, -0.2, 0.3];
+
+        // Simulate emitting both events from the same chunk
+        let raw_event = StreamingAudioData {
+            samples: chunk.clone(),
+            sample_rate: 48000,
+            sample_offset: offset,
+        };
+        let processed_event = StreamingAudioData {
+            samples: chunk.iter().map(|s| s * 2.0).collect(), // different data
+            sample_rate: 48000,
+            sample_offset: offset,
+        };
+
+        // Both share the same offset
+        assert_eq!(raw_event.sample_offset, processed_event.sample_offset);
+
+        // After the chunk, offset advances by chunk length
+        offset += chunk.len() as u64;
+        assert_eq!(offset, 3);
+    }
+
+    /// The sample_offset counter is only incremented when at least one
+    /// streaming flag is enabled (matches the conditional in the audio loop).
+    #[test]
+    fn audio_stream_offset_gated_by_flags() {
+        // Simulate the audio loop's conditional offset increment
+        let audio_streaming_enabled = false;
+        let raw_audio_streaming_enabled = false;
+        let mut offset: u64 = 0;
+
+        // With both disabled, offset should not advance
+        if audio_streaming_enabled || raw_audio_streaming_enabled {
+            offset += 480;
+        }
+        assert_eq!(offset, 0);
+
+        // With one enabled, offset should advance
+        let audio_streaming_enabled = true;
+        if audio_streaming_enabled || raw_audio_streaming_enabled {
+            offset += 480;
+        }
+        assert_eq!(offset, 480);
     }
 }
