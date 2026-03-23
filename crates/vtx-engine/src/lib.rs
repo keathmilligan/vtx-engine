@@ -1283,6 +1283,7 @@ impl AudioEngine {
     ) -> Result<Vec<TranscriptionSegment>, String> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let sender = self.sender.clone();
+        let model_path = self.model_path.clone();
 
         let segments = tokio::task::spawn_blocking(move || {
             let reader = hound::WavReader::open(&path_str)
@@ -1322,7 +1323,7 @@ impl AudioEngine {
 
             let total_duration_ms = (resampled.len() as u64 * 1000) / 16_000;
 
-            let mut transcriber = transcription::Transcriber::new();
+            let mut transcriber = transcription::Transcriber::with_model_path(model_path);
             let text = transcriber.transcribe(&resampled)?;
 
             if text.trim().is_empty() || text.trim() == "(No speech detected)" {
@@ -1375,6 +1376,7 @@ impl AudioEngine {
         session_start: std::time::Instant,
     ) -> tokio::task::JoinHandle<Vec<TranscriptionSegment>> {
         let sender = self.sender.clone();
+        let model_path = self.model_path.clone();
 
         tokio::task::spawn_blocking(move || {
             use transcription::Transcriber;
@@ -1383,7 +1385,7 @@ impl AudioEngine {
             // Minimum audio frames to attempt transcription (~500 ms at 16kHz).
             const MIN_SEGMENT_FRAMES: usize = 8_000;
 
-            let mut transcriber = Transcriber::new();
+            let mut transcriber = Transcriber::with_model_path(model_path);
             let mut accumulator: Vec<f32> = Vec::new();
             let mut all_segments: Vec<TranscriptionSegment> = Vec::new();
 

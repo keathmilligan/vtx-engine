@@ -54,6 +54,8 @@ pub struct TranscriptionQueue {
     queue: Arc<Mutex<VecDeque<QueuedSegment>>>,
     /// Flag indicating worker should continue running
     worker_active: Arc<AtomicBool>,
+    /// Monotonic worker generation used to retire stale worker threads.
+    worker_generation: Arc<AtomicUsize>,
     /// Count of segments currently in queue
     queue_count: Arc<AtomicUsize>,
     /// Callback for transcription events
@@ -66,6 +68,7 @@ impl TranscriptionQueue {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             worker_active: Arc::new(AtomicBool::new(false)),
+            worker_generation: Arc::new(AtomicUsize::new(0)),
             queue_count: Arc::new(AtomicUsize::new(0)),
             callback: Arc::new(Mutex::new(None)),
         }
@@ -118,9 +121,11 @@ impl TranscriptionQueue {
         }
 
         self.worker_active.store(true, Ordering::SeqCst);
+        let worker_id = self.worker_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         let queue = Arc::clone(&self.queue);
         let worker_active = Arc::clone(&self.worker_active);
+        let worker_generation = Arc::clone(&self.worker_generation);
         let queue_count = Arc::clone(&self.queue_count);
         let callback = Arc::clone(&self.callback);
 
@@ -145,6 +150,10 @@ impl TranscriptionQueue {
             }
 
             loop {
+                if worker_generation.load(Ordering::SeqCst) != worker_id {
+                    break;
+                }
+
                 // Check if we should stop
                 if !worker_active.load(Ordering::SeqCst) {
                     // Drain remaining queue before exiting
@@ -230,6 +239,10 @@ impl TranscriptionQueue {
                 }
             }
 
+            if worker_generation.load(Ordering::SeqCst) == worker_id {
+                worker_active.store(false, Ordering::SeqCst);
+            }
+
             tracing::info!("[TranscriptionQueue] Worker thread exiting");
         });
     }
@@ -244,13 +257,8 @@ impl TranscriptionQueue {
     /// Stops the current worker (draining remaining queue) and starts a new one
     /// with the specified model path. This is useful for switching models at runtime.
     pub fn restart_worker(&self, model_path: PathBuf) {
-        self.stop_worker();
-
-        // Wait for worker to finish draining
-        while self.worker_active.load(Ordering::SeqCst) {
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-
+        self.worker_generation.fetch_add(1, Ordering::SeqCst);
+        self.worker_active.store(false, Ordering::SeqCst);
         self.start_worker(model_path);
     }
 
