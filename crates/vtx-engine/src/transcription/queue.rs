@@ -239,6 +239,21 @@ impl TranscriptionQueue {
         self.worker_active.store(false, Ordering::SeqCst);
     }
 
+    /// Restart the transcription worker with a new model.
+    ///
+    /// Stops the current worker (draining remaining queue) and starts a new one
+    /// with the specified model path. This is useful for switching models at runtime.
+    pub fn restart_worker(&self, model_path: PathBuf) {
+        self.stop_worker();
+
+        // Wait for worker to finish draining
+        while self.worker_active.load(Ordering::SeqCst) {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        self.start_worker(model_path);
+    }
+
     /// Clear the queue (discard pending segments).
     pub fn clear(&self) {
         let mut queue = self.queue.lock().unwrap();

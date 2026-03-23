@@ -325,6 +325,8 @@ where
 pub struct AudioEngine {
     /// Engine configuration
     config: EngineConfig,
+    /// Application name used for resolving model paths
+    app_name: String,
     /// Runtime recording-mode override.
     ///
     /// When `Some`, this value is used instead of `config.recording_mode` for
@@ -1089,12 +1091,36 @@ impl AudioEngine {
     ///
     /// The new configuration takes effect on the next `start_capture` call,
     /// except for `mic_gain_db` and `agc` which are applied immediately.
+    ///
+    /// If the model changes, the transcription worker is restarted with the new model.
     pub fn set_config(&mut self, config: EngineConfig) {
         let gain = config.mic_gain_db;
         let agc = config.agc.clone();
+        
+        // Check if model has changed
+        let model_changed = self.config.model != config.model;
+        
         self.config = config;
         self.set_mic_gain(gain);
         self.set_agc_config(agc);
+        
+        // If model changed, resolve new path and restart transcription worker
+        if model_changed {
+            let new_model_path = crate::model_manager::ModelManager::new(&self.app_name)
+                .path(self.config.model);
+            
+            info!(
+                "[Engine] Model changed from {:?} to {:?}, updating path: {}",
+                self.config.model, self.config.model, new_model_path.display()
+            );
+            
+            self.model_path = new_model_path.clone();
+            
+            // Restart transcription worker with new model if transcription is enabled
+            if let Some(ref queue) = self.transcription_queue {
+                queue.restart_worker(new_model_path);
+            }
+        }
     }
 
     /// Check if the Whisper model is available.

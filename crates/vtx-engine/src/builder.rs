@@ -341,6 +341,7 @@ impl EngineBuilder {
         let initial_agc_config = self.config.agc.clone();
         let engine = AudioEngine {
             config: self.config,
+            app_name: self.app_name,
             recording_mode_override: Arc::new(std::sync::Mutex::new(None)),
             sender,
             transcription_queue,
