@@ -54,8 +54,6 @@ interface TranscriptionSegment {
 // Settings persistence
 // =============================================================================
 
-const SETTINGS_KEY = "vtx-demo-settings";
-
 /** Mirror of the Rust AgcConfig struct. */
 interface AgcConfig {
   enabled: boolean;
@@ -85,92 +83,72 @@ interface EngineConfig {
   agc: AgcConfig;
 }
 
-interface AppSettings {
+/** Mirror of the Rust DemoConfig struct for JSON file persistence. */
+interface DemoConfig {
   model: string;
-  transcriptionEnabled: boolean;
-  autoTranscriptionEnabled: boolean;
-  aecEnabled: boolean;
-  primaryDeviceId: string;
-  secondaryDeviceId: string;
-  // Engine config fields (persisted as camelCase in localStorage)
-  micGainDb: number;
-  vadVoicedThresholdDb: number;
-  vadWhisperThresholdDb: number;
-  vadVoicedOnsetMs: number;
-  vadWhisperOnsetMs: number;
-  segmentMaxDurationMs: number;
-  segmentWordBreakGraceMs: number;
-  segmentLookbackMs: number;
-  transcriptionQueueCapacity: number;
-  vizFrameIntervalMs: number;
-  wordBreakSegmentationEnabled: boolean;
-  audioOutputDeviceId: string;
-  // AGC fields
-  agcEnabled: boolean;
-  agcTargetLevelDb: number;
-  agcGateThresholdDb: number;
+  transcription_enabled: boolean;
+  auto_transcription_enabled: boolean;
+  aec_enabled: boolean;
+  primary_device_id: string;
+  secondary_device_id: string;
+  mic_gain_db: number;
+  vad_voiced_threshold_db: number;
+  vad_whisper_threshold_db: number;
+  vad_voiced_onset_ms: number;
+  vad_whisper_onset_ms: number;
+  segment_max_duration_ms: number;
+  segment_word_break_grace_ms: number;
+  segment_lookback_ms: number;
+  transcription_queue_capacity: number;
+  viz_frame_interval_ms: number;
+  word_break_segmentation_enabled: boolean;
+  audio_output_device_id: string;
+  agc_enabled: boolean;
+  agc_target_level_db: number;
+  agc_gate_threshold_db: number;
 }
 
-function loadSettings(): AppSettings {
+async function loadDemoConfig(): Promise<DemoConfig> {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) {
-      return { ...defaultSettings(), ...JSON.parse(raw) };
-    }
-  } catch {
-    // Ignore parse errors — fall through to defaults
+    return await invoke<DemoConfig>("load_demo_config");
+  } catch (e) {
+    console.error("Failed to load demo config:", e);
+    return defaultDemoConfig();
   }
-  return defaultSettings();
 }
 
-function defaultSettings(): AppSettings {
+function defaultDemoConfig(): DemoConfig {
   return {
     model: "base_en",
-    transcriptionEnabled: true,
-    autoTranscriptionEnabled: false,
-    aecEnabled: false,
-    primaryDeviceId: "",
-    secondaryDeviceId: "",
-    // Engine config defaults (must match Rust EngineConfig defaults)
-    micGainDb: 0.0,
-    vadVoicedThresholdDb: -42.0,
-    vadWhisperThresholdDb: -52.0,
-    vadVoicedOnsetMs: 80,
-    vadWhisperOnsetMs: 120,
-    segmentMaxDurationMs: 4000,
-    segmentWordBreakGraceMs: 750,
-    segmentLookbackMs: 200,
-    transcriptionQueueCapacity: 8,
-    vizFrameIntervalMs: 16,
-    wordBreakSegmentationEnabled: true,
-    audioOutputDeviceId: "",
-    // AGC defaults (must match Rust AgcConfig defaults)
-    agcEnabled: false,
-    agcTargetLevelDb: -18.0,
-    agcGateThresholdDb: -50.0,
+    transcription_enabled: true,
+    auto_transcription_enabled: false,
+    aec_enabled: false,
+    primary_device_id: "",
+    secondary_device_id: "",
+    mic_gain_db: 0.0,
+    vad_voiced_threshold_db: -42.0,
+    vad_whisper_threshold_db: -52.0,
+    vad_voiced_onset_ms: 80,
+    vad_whisper_onset_ms: 120,
+    segment_max_duration_ms: 4000,
+    segment_word_break_grace_ms: 750,
+    segment_lookback_ms: 200,
+    transcription_queue_capacity: 8,
+    viz_frame_interval_ms: 16,
+    word_break_segmentation_enabled: true,
+    audio_output_device_id: "",
+    agc_enabled: false,
+    agc_target_level_db: -18.0,
+    agc_gate_threshold_db: -50.0,
   };
 }
 
-function saveSettings(settings: AppSettings): void {
+async function saveDemoConfig(config: DemoConfig): Promise<void> {
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    // Ignore storage errors
+    await invoke("save_demo_config", { config });
+  } catch (e) {
+    console.error("Failed to save demo config:", e);
   }
-}
-
-function getCurrentSettings(): AppSettings {
-  // Merge with persisted settings so engine config fields are not lost
-  // when saving only the toggle/device state.
-  const persisted = loadSettings();
-  return {
-    ...persisted,
-    transcriptionEnabled,
-    autoTranscriptionEnabled,
-    aecEnabled,
-    primaryDeviceId: deviceSelect.value,
-    secondaryDeviceId: deviceSelect2.value,
-  };
 }
 
 // =============================================================================
@@ -184,11 +162,11 @@ let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
 
-// Load persisted settings
-const settings = loadSettings();
-let transcriptionEnabled = settings.transcriptionEnabled;
-let autoTranscriptionEnabled = settings.autoTranscriptionEnabled;
-let aecEnabled = settings.aecEnabled;
+// Demo config loaded from backend
+let demoConfig: DemoConfig;
+let transcriptionEnabled: boolean;
+let autoTranscriptionEnabled: boolean;
+let aecEnabled: boolean;
 
 // =============================================================================
 // DOM Elements
@@ -255,6 +233,12 @@ function setActiveDocument(path: string | null) {
 // =============================================================================
 
 async function init() {
+  // Load persisted config from backend
+  demoConfig = await loadDemoConfig();
+  transcriptionEnabled = demoConfig.transcription_enabled;
+  autoTranscriptionEnabled = demoConfig.auto_transcription_enabled;
+  aecEnabled = demoConfig.aec_enabled;
+
   // Apply persisted toggle states to DOM
   transcriptionToggle.checked = transcriptionEnabled;
   autoTranscriptionToggle.checked = autoTranscriptionEnabled;
@@ -436,8 +420,14 @@ function setupEventListeners() {
   aecToggle.addEventListener("change", onAecToggle);
 
   // Save device selections on change
-  deviceSelect.addEventListener("change", () => saveSettings(getCurrentSettings()));
-  deviceSelect2.addEventListener("change", () => saveSettings(getCurrentSettings()));
+  deviceSelect.addEventListener("change", async () => {
+    demoConfig.primary_device_id = deviceSelect.value;
+    await saveDemoConfig(demoConfig);
+  });
+  deviceSelect2.addEventListener("change", async () => {
+    demoConfig.secondary_device_id = deviceSelect2.value;
+    await saveDemoConfig(demoConfig);
+  });
 
   // Speech activity scroll buttons
   // Each click scrolls by 1/4 of the visible window (bufferSize/4 frames).
@@ -653,11 +643,11 @@ async function loadDevices() {
 
     // Restore saved device selections if they still exist in the list
     const allDeviceIds = [...inputDevices, ...systemDevices].map((d) => d.id);
-    if (settings.primaryDeviceId && allDeviceIds.includes(settings.primaryDeviceId)) {
-      deviceSelect.value = settings.primaryDeviceId;
+    if (demoConfig.primary_device_id && allDeviceIds.includes(demoConfig.primary_device_id)) {
+      deviceSelect.value = demoConfig.primary_device_id;
     }
-    if (settings.secondaryDeviceId === "" || allDeviceIds.includes(settings.secondaryDeviceId)) {
-      deviceSelect2.value = settings.secondaryDeviceId;
+    if (demoConfig.secondary_device_id === "" || allDeviceIds.includes(demoConfig.secondary_device_id)) {
+      deviceSelect2.value = demoConfig.secondary_device_id;
     }
 
     btnCapture.disabled = false;
@@ -933,7 +923,10 @@ async function checkGpuStatus() {
 
 async function onTranscriptionToggle() {
   transcriptionEnabled = transcriptionToggle.checked;
-  saveSettings(getCurrentSettings());
+  demoConfig.transcription_enabled = transcriptionEnabled;
+  demoConfig.primary_device_id = deviceSelect.value;
+  demoConfig.secondary_device_id = deviceSelect2.value;
+  await saveDemoConfig(demoConfig);
   try {
     await invoke("set_transcription_enabled", { enabled: transcriptionEnabled });
   } catch (e) {
@@ -941,22 +934,29 @@ async function onTranscriptionToggle() {
     // Revert the toggle on failure
     transcriptionEnabled = !transcriptionEnabled;
     transcriptionToggle.checked = transcriptionEnabled;
-    saveSettings(getCurrentSettings());
+    demoConfig.transcription_enabled = transcriptionEnabled;
+    await saveDemoConfig(demoConfig);
   }
 }
 
 async function onAutoTranscriptionToggle() {
   autoTranscriptionEnabled = autoTranscriptionToggle.checked;
-  saveSettings(getCurrentSettings());
+  demoConfig.auto_transcription_enabled = autoTranscriptionEnabled;
+  demoConfig.primary_device_id = deviceSelect.value;
+  demoConfig.secondary_device_id = deviceSelect2.value;
+  await saveDemoConfig(demoConfig);
   // auto-transcription OFF means PTT mode ON (manual submission on stop)
   await invoke("set_ptt_mode", { enabled: !autoTranscriptionEnabled }).catch((e) => {
     console.error("Failed to set PTT mode:", e);
   });
 }
 
-function onAecToggle() {
+async function onAecToggle() {
   aecEnabled = aecToggle.checked;
-  saveSettings(getCurrentSettings());
+  demoConfig.aec_enabled = aecEnabled;
+  demoConfig.primary_device_id = deviceSelect.value;
+  demoConfig.secondary_device_id = deviceSelect2.value;
+  await saveDemoConfig(demoConfig);
   // Persist the recording mode to the engine so it takes effect on the next
   // start_capture call. Fetch the current config to avoid clobbering other
   // settings, then update only recording_mode.
@@ -1320,16 +1320,14 @@ async function openConfigPanel(): Promise<void> {
   } catch (e) {
     console.error("Failed to get engine config:", e);
     // Fall back to saved settings
-    const s = loadSettings();
-    populateConfigForm(settingsToEngineConfig(s));
+    populateConfigForm(demoConfigToEngineConfig(demoConfig));
   }
 
   // Fetch model status
   await fetchAndRenderModelList();
 
   // Populate output devices
-  const savedSettings = loadSettings();
-  await populateOutputDevices(savedSettings.audioOutputDeviceId);
+  await populateOutputDevices(demoConfig.audio_output_device_id);
 
   // Show capture warning if active
   configCaptureWarning.style.display = isRecording ? "" : "none";
@@ -1375,28 +1373,27 @@ async function saveConfig(): Promise<void> {
   // playback now goes through the engine's WASAPI render endpoint which uses
   // the system default output device.
 
-  // Persist to localStorage
-  const s = loadSettings();
-  const updated: AppSettings = {
-    ...s,
+  // Persist to JSON config file
+  demoConfig = {
+    ...demoConfig,
     model: cfg.model,
-    micGainDb: cfg.mic_gain_db,
-    agcEnabled: cfg.agc.enabled,
-    agcTargetLevelDb: cfg.agc.target_level_db,
-    agcGateThresholdDb: cfg.agc.gate_threshold_db,
-    vadVoicedThresholdDb: cfg.vad_voiced_threshold_db,
-    vadWhisperThresholdDb: cfg.vad_whisper_threshold_db,
-    vadVoicedOnsetMs: cfg.vad_voiced_onset_ms,
-    vadWhisperOnsetMs: cfg.vad_whisper_onset_ms,
-    segmentMaxDurationMs: cfg.segment_max_duration_ms,
-    segmentWordBreakGraceMs: cfg.segment_word_break_grace_ms,
-    segmentLookbackMs: cfg.segment_lookback_ms,
-    transcriptionQueueCapacity: cfg.transcription_queue_capacity,
-    vizFrameIntervalMs: cfg.viz_frame_interval_ms,
-    wordBreakSegmentationEnabled: cfg.word_break_segmentation_enabled,
-    audioOutputDeviceId: cfgOutputDevice.value,
+    mic_gain_db: cfg.mic_gain_db,
+    agc_enabled: cfg.agc.enabled,
+    agc_target_level_db: cfg.agc.target_level_db,
+    agc_gate_threshold_db: cfg.agc.gate_threshold_db,
+    vad_voiced_threshold_db: cfg.vad_voiced_threshold_db,
+    vad_whisper_threshold_db: cfg.vad_whisper_threshold_db,
+    vad_voiced_onset_ms: cfg.vad_voiced_onset_ms,
+    vad_whisper_onset_ms: cfg.vad_whisper_onset_ms,
+    segment_max_duration_ms: cfg.segment_max_duration_ms,
+    segment_word_break_grace_ms: cfg.segment_word_break_grace_ms,
+    segment_lookback_ms: cfg.segment_lookback_ms,
+    transcription_queue_capacity: cfg.transcription_queue_capacity,
+    viz_frame_interval_ms: cfg.viz_frame_interval_ms,
+    word_break_segmentation_enabled: cfg.word_break_segmentation_enabled,
+    audio_output_device_id: cfgOutputDevice.value,
   };
-  saveSettings(updated);
+  await saveDemoConfig(demoConfig);
 
   // Update model name badge in status bar
   const modelEntry = modelStatus.find((m) => m.model === cfg.model);
@@ -1412,37 +1409,37 @@ async function saveConfig(): Promise<void> {
 
 /** Reset all form fields to factory defaults without saving. */
 function resetToDefaults(): void {
-  const d = defaultSettings();
-  populateConfigForm(settingsToEngineConfig(d));
+  const d = defaultDemoConfig();
+  populateConfigForm(demoConfigToEngineConfig(d));
   // Also reset output device selector to default
   cfgOutputDevice.value = "";
 }
 
-/** Convert AppSettings (camelCase) to EngineConfig (snake_case). */
-function settingsToEngineConfig(s: AppSettings): EngineConfig {
+/** Convert DemoConfig to EngineConfig. */
+function demoConfigToEngineConfig(d: DemoConfig): EngineConfig {
   return {
-    model: s.model,
-    recording_mode: s.aecEnabled ? "echo_cancel" : "mixed",
-    mic_gain_db: s.micGainDb,
+    model: d.model,
+    recording_mode: d.aec_enabled ? "echo_cancel" : "mixed",
+    mic_gain_db: d.mic_gain_db,
     agc: {
-      enabled: s.agcEnabled,
-      target_level_db: s.agcTargetLevelDb,
+      enabled: d.agc_enabled,
+      target_level_db: d.agc_target_level_db,
       attack_time_ms: 10.0,
       release_time_ms: 200.0,
       min_gain_db: -6.0,
       max_gain_db: 30.0,
-      gate_threshold_db: s.agcGateThresholdDb,
+      gate_threshold_db: d.agc_gate_threshold_db,
     },
-    vad_voiced_threshold_db: s.vadVoicedThresholdDb,
-    vad_whisper_threshold_db: s.vadWhisperThresholdDb,
-    vad_voiced_onset_ms: s.vadVoicedOnsetMs,
-    vad_whisper_onset_ms: s.vadWhisperOnsetMs,
-    segment_max_duration_ms: s.segmentMaxDurationMs,
-    segment_word_break_grace_ms: s.segmentWordBreakGraceMs,
-    segment_lookback_ms: s.segmentLookbackMs,
-    transcription_queue_capacity: s.transcriptionQueueCapacity,
-    viz_frame_interval_ms: s.vizFrameIntervalMs,
-    word_break_segmentation_enabled: s.wordBreakSegmentationEnabled,
+    vad_voiced_threshold_db: d.vad_voiced_threshold_db,
+    vad_whisper_threshold_db: d.vad_whisper_threshold_db,
+    vad_voiced_onset_ms: d.vad_voiced_onset_ms,
+    vad_whisper_onset_ms: d.vad_whisper_onset_ms,
+    segment_max_duration_ms: d.segment_max_duration_ms,
+    segment_word_break_grace_ms: d.segment_word_break_grace_ms,
+    segment_lookback_ms: d.segment_lookback_ms,
+    transcription_queue_capacity: d.transcription_queue_capacity,
+    viz_frame_interval_ms: d.viz_frame_interval_ms,
+    word_break_segmentation_enabled: d.word_break_segmentation_enabled,
   };
 }
 

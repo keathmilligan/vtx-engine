@@ -28,6 +28,120 @@ struct ModelStatusEntry {
     downloaded: bool,
 }
 
+/// Demo app configuration persisted to JSON file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DemoConfig {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub transcription_enabled: bool,
+    #[serde(default)]
+    pub auto_transcription_enabled: bool,
+    #[serde(default)]
+    pub aec_enabled: bool,
+    #[serde(default)]
+    pub primary_device_id: String,
+    #[serde(default)]
+    pub secondary_device_id: String,
+    #[serde(default)]
+    pub mic_gain_db: f64,
+    #[serde(default)]
+    pub vad_voiced_threshold_db: f64,
+    #[serde(default)]
+    pub vad_whisper_threshold_db: f64,
+    #[serde(default)]
+    pub vad_voiced_onset_ms: u32,
+    #[serde(default)]
+    pub vad_whisper_onset_ms: u32,
+    #[serde(default)]
+    pub segment_max_duration_ms: u32,
+    #[serde(default)]
+    pub segment_word_break_grace_ms: u32,
+    #[serde(default)]
+    pub segment_lookback_ms: u32,
+    #[serde(default = "default_transcription_queue_capacity")]
+    pub transcription_queue_capacity: u32,
+    #[serde(default = "default_viz_frame_interval_ms")]
+    pub viz_frame_interval_ms: u32,
+    #[serde(default = "default_word_break_segmentation_enabled")]
+    pub word_break_segmentation_enabled: bool,
+    #[serde(default)]
+    pub audio_output_device_id: String,
+    #[serde(default)]
+    pub agc_enabled: bool,
+    #[serde(default = "default_agc_target_level_db")]
+    pub agc_target_level_db: f64,
+    #[serde(default = "default_agc_gate_threshold_db")]
+    pub agc_gate_threshold_db: f64,
+}
+
+fn default_transcription_queue_capacity() -> u32 { 8 }
+fn default_viz_frame_interval_ms() -> u32 { 16 }
+fn default_word_break_segmentation_enabled() -> bool { true }
+fn default_agc_target_level_db() -> f64 { -18.0 }
+fn default_agc_gate_threshold_db() -> f64 { -50.0 }
+
+impl Default for DemoConfig {
+    fn default() -> Self {
+        Self {
+            model: "base_en".to_string(),
+            transcription_enabled: true,
+            auto_transcription_enabled: false,
+            aec_enabled: false,
+            primary_device_id: String::new(),
+            secondary_device_id: String::new(),
+            mic_gain_db: 0.0,
+            vad_voiced_threshold_db: -42.0,
+            vad_whisper_threshold_db: -52.0,
+            vad_voiced_onset_ms: 80,
+            vad_whisper_onset_ms: 120,
+            segment_max_duration_ms: 4000,
+            segment_word_break_grace_ms: 750,
+            segment_lookback_ms: 200,
+            transcription_queue_capacity: default_transcription_queue_capacity(),
+            viz_frame_interval_ms: default_viz_frame_interval_ms(),
+            word_break_segmentation_enabled: default_word_break_segmentation_enabled(),
+            audio_output_device_id: String::new(),
+            agc_enabled: false,
+            agc_target_level_db: default_agc_target_level_db(),
+            agc_gate_threshold_db: default_agc_gate_threshold_db(),
+        }
+    }
+}
+
+const CONFIG_FILENAME: &str = "config.json";
+
+fn demo_config_path() -> Result<std::path::PathBuf, String> {
+    let dirs = directories::ProjectDirs::from("", "", "vtx-demo")
+        .ok_or("Cannot determine config directory")?;
+    Ok(dirs.config_dir().join(CONFIG_FILENAME))
+}
+
+impl DemoConfig {
+    pub fn load() -> Result<Self, String> {
+        let path = demo_config_path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read config file: {}", e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file: {}", e))
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let path = demo_config_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&path, content)
+            .map_err(|e| format!("Failed to write config file: {}", e))
+    }
+}
+
 // =============================================================================
 // Tauri Commands
 // =============================================================================
@@ -288,6 +402,16 @@ async fn cancel_model_download(
     Ok(())
 }
 
+#[tauri::command]
+async fn load_demo_config() -> Result<DemoConfig, String> {
+    DemoConfig::load()
+}
+
+#[tauri::command]
+async fn save_demo_config(config: DemoConfig) -> Result<(), String> {
+    config.save()
+}
+
 // =============================================================================
 // App Entry Point
 // =============================================================================
@@ -420,6 +544,8 @@ pub fn run() {
             get_model_status,
             download_model_by_name,
             cancel_model_download,
+            load_demo_config,
+            save_demo_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vtx-demo");

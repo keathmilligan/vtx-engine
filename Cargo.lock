@@ -5054,6 +5054,7 @@ dependencies = [
 name = "vtx-demo"
 version = "0.3.0"
 dependencies = [
+ "directories",
  "serde",
  "serde_json",
  "tauri",

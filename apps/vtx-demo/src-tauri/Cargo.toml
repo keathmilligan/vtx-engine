@@ -21,3 +21,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { workspace = true }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+directories = "5"

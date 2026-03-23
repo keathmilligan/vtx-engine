@@ -85,16 +85,17 @@ The panel SHALL organize settings into the following labeled sections:
 - **THEN** the AGC target level slider is interactive and its current value is displayed
 
 ### Requirement: Saving configuration applies settings and persists them
-Clicking the Save button in the configuration panel SHALL invoke the `set_engine_config` Tauri command with the current form values, update the audio output device on the `<audio>` element via `setSinkId` (if supported and changed), persist all config values to `localStorage` under the existing `AppSettings` key, and close the panel.
+Clicking the Save button in the configuration panel SHALL invoke the `set_engine_config` Tauri command with the current form values, update the audio output device on the `<audio>` element via `setSinkId` (if supported and changed), persist all config values to the JSON config file via the `save_demo_config` Tauri command, and close the panel.
 
 #### Scenario: Save sends updated config to backend
 - **WHEN** the user changes the voiced threshold value and clicks Save
 - **THEN** `set_engine_config` is invoked with an `EngineConfig` object containing the updated value
 - **THEN** the panel closes
 
-#### Scenario: Save persists values to localStorage
+#### Scenario: Save persists values to JSON config file
 - **WHEN** the user changes any config field and clicks Save
-- **THEN** `localStorage` contains the updated values under the `vtx-demo-settings` key
+- **THEN** `save_demo_config` is invoked with the updated settings
+- **THEN** the config file at `{config_dir}/vtx-demo/config.json` contains the updated values
 
 #### Scenario: Save applies audio output device selection
 - **WHEN** the user selects a different output device and clicks Save on a platform supporting `setSinkId`
@@ -110,7 +111,7 @@ The configuration panel SHALL include a "Reset to Defaults" button that resets a
 
 #### Scenario: Reset does not persist until Save is clicked
 - **WHEN** the user clicks "Reset to Defaults" and then closes the panel without clicking Save
-- **THEN** the previously saved config values are unchanged in `localStorage` and the backend
+- **THEN** the previously saved config values are unchanged in the JSON config file and the backend
 
 ### Requirement: A warning is shown when configuration changes require capture restart
 When the configuration panel is opened while audio capture is active, the panel SHALL display a visible inline warning stating that changes will take effect on the next capture session.
@@ -126,9 +127,9 @@ When the configuration panel is opened while audio capture is active, the panel 
 ### Requirement: AppSettings is extended to persist engine config and output device
 The `AppSettings` interface SHALL be extended with fields for all `EngineConfig` tunable parameters and the selected audio output device ID. These fields SHALL use the `EngineConfig` defaults when absent (backward-compatible via object spread merge in `loadSettings`).
 
-#### Scenario: Existing localStorage settings load without error after schema extension
-- **WHEN** `localStorage` contains an `AppSettings` blob written before this change (without the new fields)
-- **THEN** `loadSettings()` returns an object with the new fields populated from `defaultSettings()`
+#### Scenario: Settings load without error after schema extension
+- **WHEN** the config file is loaded
+- **THEN** `loadSettings()` returns an object with all fields populated from the file or defaults
 - **THEN** no error is thrown
 
 ### Requirement: get_engine_config and set_engine_config Tauri commands are available
@@ -151,14 +152,14 @@ The demo Tauri backend SHALL expose two commands:
 - **THEN** the new config (except `mic_gain_db`) takes effect on the next `start_capture` call
 
 ### Requirement: AGC config fields are included in AppSettings persistence
-The `AppSettings` TypeScript interface SHALL include `agcEnabled: boolean` and `agcTargetLevelDb: number` fields. These SHALL be written to `localStorage` on Save and restored on load, merging with defaults when absent.
+The `AppSettings` TypeScript interface SHALL include `agcEnabled: boolean`, `agcTargetLevelDb: number`, and `agcGateThresholdDb: number` fields. These SHALL be written to the JSON config file on Save and restored on load, merging with defaults when absent.
 
 #### Scenario: AppSettings without AGC fields loads without error
-- **WHEN** `localStorage` contains an `AppSettings` blob written before this change (without `agcEnabled` or `agcTargetLevelDb`)
-- **THEN** `loadSettings()` returns an object with `agcEnabled = false` and `agcTargetLevelDb = -18.0`
+- **WHEN** the config file does not contain `agcEnabled`, `agcTargetLevelDb`, or `agcGateThresholdDb`
+- **THEN** `loadSettings()` returns an object with `agcEnabled = false`, `agcTargetLevelDb = -18.0`, and `agcGateThresholdDb = -50.0`
 - **THEN** no error is thrown
 
-#### Scenario: AGC fields round-trip through localStorage
+#### Scenario: AGC fields round-trip through JSON config file
 - **WHEN** the user enables AGC, sets target to -20 dB, clicks Save, and reopens the config panel
 - **THEN** the AGC enable checkbox is checked and the target level slider shows -20 dB
 
