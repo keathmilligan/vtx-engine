@@ -527,6 +527,44 @@ pub enum WhisperModel {
 }
 
 impl WhisperModel {
+    /// Return the canonical config/API identifier for this model.
+    pub fn config_key(self) -> &'static str {
+        match self {
+            WhisperModel::TinyEn => "tiny_en",
+            WhisperModel::Tiny => "tiny",
+            WhisperModel::BaseEn => "base_en",
+            WhisperModel::Base => "base",
+            WhisperModel::SmallEn => "small_en",
+            WhisperModel::Small => "small",
+            WhisperModel::MediumEn => "medium_en",
+            WhisperModel::Medium => "medium",
+            WhisperModel::LargeV3Turbo => "large_v3_turbo",
+            WhisperModel::LargeV3 => "large_v3",
+        }
+    }
+
+    /// Parse a model identifier from config, UI, slug, or filename form.
+    pub fn parse_identifier(value: &str) -> Option<Self> {
+        let normalized = value.trim().trim_matches('"');
+        let normalized = normalized.strip_prefix("ggml-").unwrap_or(normalized);
+        let normalized = normalized.strip_suffix(".bin").unwrap_or(normalized);
+        let normalized = normalized.to_ascii_lowercase();
+
+        match normalized.as_str() {
+            "tiny_en" | "tiny.en" => Some(WhisperModel::TinyEn),
+            "tiny" => Some(WhisperModel::Tiny),
+            "base_en" | "base.en" => Some(WhisperModel::BaseEn),
+            "base" => Some(WhisperModel::Base),
+            "small_en" | "small.en" => Some(WhisperModel::SmallEn),
+            "small" => Some(WhisperModel::Small),
+            "medium_en" | "medium.en" => Some(WhisperModel::MediumEn),
+            "medium" => Some(WhisperModel::Medium),
+            "large_v3_turbo" | "large-v3-turbo" => Some(WhisperModel::LargeV3Turbo),
+            "large_v3" | "large-v3" => Some(WhisperModel::LargeV3),
+            _ => None,
+        }
+    }
+
     /// Return the canonical whisper.cpp filename slug for this model.
     ///
     /// The file name on disk is `ggml-{slug}.bin`.

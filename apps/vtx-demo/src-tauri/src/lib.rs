@@ -9,8 +9,18 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use vtx_engine::{AudioEngine, EngineBuilder, ModelManager, WhisperModel};
 use vtx_engine::*;
+use vtx_engine::{AudioEngine, EngineBuilder, ModelManager, WhisperModel};
+
+fn normalize_model_name(model: &str) -> Result<String, String> {
+    WhisperModel::parse_identifier(model)
+        .map(|parsed| parsed.config_key().to_string())
+        .ok_or_else(|| format!("Invalid model name: {model}"))
+}
+
+fn parse_model_name(model: &str) -> Result<WhisperModel, String> {
+    WhisperModel::parse_identifier(model).ok_or_else(|| format!("Invalid model name: {model}"))
+}
 
 /// Application state shared across Tauri commands.
 struct AppState {
@@ -75,11 +85,21 @@ pub struct DemoConfig {
     pub agc_gate_threshold_db: f64,
 }
 
-fn default_transcription_queue_capacity() -> u32 { 8 }
-fn default_viz_frame_interval_ms() -> u32 { 16 }
-fn default_word_break_segmentation_enabled() -> bool { true }
-fn default_agc_target_level_db() -> f64 { -18.0 }
-fn default_agc_gate_threshold_db() -> f64 { -50.0 }
+fn default_transcription_queue_capacity() -> u32 {
+    8
+}
+fn default_viz_frame_interval_ms() -> u32 {
+    16
+}
+fn default_word_break_segmentation_enabled() -> bool {
+    true
+}
+fn default_agc_target_level_db() -> f64 {
+    -18.0
+}
+fn default_agc_gate_threshold_db() -> f64 {
+    -50.0
+}
 
 impl Default for DemoConfig {
     fn default() -> Self {
@@ -125,8 +145,14 @@ impl DemoConfig {
         }
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read config file: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file: {}", e))
+        let mut config: Self = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file: {}", e))?;
+
+        if !config.model.trim().is_empty() {
+            config.model = normalize_model_name(&config.model)?;
+        }
+
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -135,10 +161,13 @@ impl DemoConfig {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
-        let content = serde_json::to_string_pretty(self)
+        let mut normalized = self.clone();
+        if !normalized.model.trim().is_empty() {
+            normalized.model = normalize_model_name(&normalized.model)?;
+        }
+        let content = serde_json::to_string_pretty(&normalized)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        std::fs::write(&path, content)
-            .map_err(|e| format!("Failed to write config file: {}", e))
+        std::fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))
     }
 }
 
@@ -154,7 +183,9 @@ async fn list_input_devices(state: tauri::State<'_, AppState>) -> Result<Vec<Aud
 }
 
 #[tauri::command]
-async fn list_system_devices(state: tauri::State<'_, AppState>) -> Result<Vec<AudioDevice>, String> {
+async fn list_system_devices(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AudioDevice>, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     Ok(engine.list_system_devices())
@@ -256,7 +287,8 @@ async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<Option<Stri
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     engine.stop_recording();
-    let path = engine.get_last_recording_path()
+    let path = engine
+        .get_last_recording_path()
         .map(|p| p.to_string_lossy().into_owned());
     Ok(path)
 }
@@ -304,7 +336,9 @@ async fn finalize_segment(state: tauri::State<'_, AppState>) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn get_engine_config(state: tauri::State<'_, AppState>) -> Result<vtx_engine::EngineConfig, String> {
+async fn get_engine_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<vtx_engine::EngineConfig, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
     Ok(engine.config().clone())
@@ -329,7 +363,7 @@ async fn get_model_status(
     let status: Vec<ModelStatusEntry> = WhisperModel::all_in_size_order()
         .iter()
         .map(|&model| ModelStatusEntry {
-            model: serde_json::to_string(&model).unwrap().trim_matches('"').to_string(),
+            model: model.config_key().to_string(),
             name: model.display_name().to_string(),
             size_mb: model.size_mb(),
             downloaded: manager.is_available(model),
@@ -344,9 +378,8 @@ async fn download_model_by_name(
     state: tauri::State<'_, AppState>,
     model: String,
 ) -> Result<(), String> {
-    let model: WhisperModel = serde_json::from_str(&format!("\"{}\"", model))
-        .map_err(|e| format!("Invalid model name: {}", e))?;
-    let model_key = serde_json::to_string(&model).unwrap().trim_matches('"').to_string();
+    let model = parse_model_name(&model)?;
+    let model_key = model.config_key().to_string();
 
     let manager = state.model_manager.clone();
     let handles = state.download_handles.clone();
@@ -358,32 +391,47 @@ async fn download_model_by_name(
     let handle = tokio::spawn(async move {
         let app_for_progress = app_handle.clone();
         let model_for_progress = model_key_for_progress.clone();
-        let result = manager.download(model, move |progress| {
-            let _ = app_for_progress.emit("model-download-progress", serde_json::json!({
-                "model": model_for_progress,
-                "progress": progress
-            }));
-        }).await;
+        let result = manager
+            .download(model, move |progress| {
+                let _ = app_for_progress.emit(
+                    "model-download-progress",
+                    serde_json::json!({
+                        "model": model_for_progress,
+                        "progress": progress
+                    }),
+                );
+            })
+            .await;
 
         match result {
             Ok(()) => {
-                let _ = app_handle.emit("model-download-progress", serde_json::json!({
-                    "model": model_key_for_complete,
-                    "progress": 100
-                }));
+                let _ = app_handle.emit(
+                    "model-download-progress",
+                    serde_json::json!({
+                        "model": model_key_for_complete,
+                        "progress": 100
+                    }),
+                );
             }
             Err(e) => {
-                let _ = app_handle.emit("model-download-error", serde_json::json!({
-                    "model": model_key_for_complete,
-                    "error": e.to_string()
-                }));
+                let _ = app_handle.emit(
+                    "model-download-error",
+                    serde_json::json!({
+                        "model": model_key_for_complete,
+                        "error": e.to_string()
+                    }),
+                );
             }
         }
 
         handles.lock().await.remove(&model_key_for_remove);
     });
 
-    state.download_handles.lock().await.insert(model_key, handle);
+    state
+        .download_handles
+        .lock()
+        .await
+        .insert(model_key, handle);
     Ok(())
 }
 
@@ -392,9 +440,8 @@ async fn cancel_model_download(
     state: tauri::State<'_, AppState>,
     model: String,
 ) -> Result<(), String> {
-    let model: WhisperModel = serde_json::from_str(&format!("\"{}\"", model))
-        .map_err(|e| format!("Invalid model name: {}", e))?;
-    let model_key = serde_json::to_string(&model).unwrap().trim_matches('"').to_string();
+    let model = parse_model_name(&model)?;
+    let model_key = model.config_key().to_string();
 
     if let Some(handle) = state.download_handles.lock().await.remove(&model_key) {
         handle.abort();
@@ -448,65 +495,79 @@ pub fn run() {
 
                         // Spawn event forwarding task using EventHandlerAdapter pattern
                         let ah = app_handle.clone();
-                        vtx_engine::EventHandlerAdapter::new(rx, move |event| {
-                            match &event {
-                                EngineEvent::VisualizationData(data) => {
-                                    let _ = ah.emit("visualization-data", data);
+                        vtx_engine::EventHandlerAdapter::new(rx, move |event| match &event {
+                            EngineEvent::VisualizationData(data) => {
+                                let _ = ah.emit("visualization-data", data);
+                            }
+                            EngineEvent::TranscriptionComplete(result) => {
+                                let _ = ah.emit("transcription-complete", result);
+                            }
+                            EngineEvent::SpeechStarted => {
+                                let _ = ah.emit("speech-started", ());
+                            }
+                            EngineEvent::SpeechEnded { duration_ms } => {
+                                let _ = ah.emit("speech-ended", duration_ms);
+                            }
+                            EngineEvent::CaptureStateChanged { capturing, error } => {
+                                #[derive(serde::Serialize, Clone)]
+                                struct CaptureState {
+                                    capturing: bool,
+                                    error: Option<String>,
                                 }
-                                EngineEvent::TranscriptionComplete(result) => {
-                                    let _ = ah.emit("transcription-complete", result);
-                                }
-                                EngineEvent::SpeechStarted => {
-                                    let _ = ah.emit("speech-started", ());
-                                }
-                                EngineEvent::SpeechEnded { duration_ms } => {
-                                    let _ = ah.emit("speech-ended", duration_ms);
-                                }
-                                EngineEvent::CaptureStateChanged { capturing, error } => {
-                                    #[derive(serde::Serialize, Clone)]
-                                    struct CaptureState { capturing: bool, error: Option<String> }
-                                    let _ = ah.emit("capture-state-changed", CaptureState {
+                                let _ = ah.emit(
+                                    "capture-state-changed",
+                                    CaptureState {
                                         capturing: *capturing,
                                         error: error.clone(),
-                                    });
+                                    },
+                                );
+                            }
+                            EngineEvent::ModelDownloadProgress { percent } => {
+                                let _ = ah.emit("model-download-progress", percent);
+                            }
+                            EngineEvent::ModelDownloadComplete { success } => {
+                                let _ = ah.emit("model-download-complete", success);
+                            }
+                            EngineEvent::AudioLevelUpdate {
+                                device_id,
+                                level_db,
+                            } => {
+                                #[derive(serde::Serialize, Clone)]
+                                struct LevelUpdate {
+                                    device_id: String,
+                                    level_db: f32,
                                 }
-                                EngineEvent::ModelDownloadProgress { percent } => {
-                                    let _ = ah.emit("model-download-progress", percent);
-                                }
-                                EngineEvent::ModelDownloadComplete { success } => {
-                                    let _ = ah.emit("model-download-complete", success);
-                                }
-                                EngineEvent::AudioLevelUpdate { device_id, level_db } => {
-                                    #[derive(serde::Serialize, Clone)]
-                                    struct LevelUpdate { device_id: String, level_db: f32 }
-                                    let _ = ah.emit("audio-level-update", LevelUpdate {
+                                let _ = ah.emit(
+                                    "audio-level-update",
+                                    LevelUpdate {
                                         device_id: device_id.clone(),
                                         level_db: *level_db,
-                                    });
-                                }
-                                EngineEvent::TranscriptionSegment(seg) => {
-                                    let _ = ah.emit("transcription-segment", seg);
-                                }
-                                EngineEvent::RecordingStarted => {
-                                    let _ = ah.emit("recording-started", ());
-                                }
-                                EngineEvent::RecordingStopped { duration_ms } => {
-                                    let _ = ah.emit("recording-stopped", duration_ms);
-                                }
-                                EngineEvent::PlaybackComplete => {
-                                    let _ = ah.emit("playback-complete", ());
-                                }
-                                EngineEvent::AgcGainChanged(gain_db) => {
-                                    let _ = ah.emit("agc-gain-changed", gain_db);
-                                }
-                                EngineEvent::AudioData(data) => {
-                                    let _ = ah.emit("audio-data", data);
-                                }
-                                EngineEvent::RawAudioData(data) => {
-                                    let _ = ah.emit("raw-audio-data", data);
-                                }
+                                    },
+                                );
                             }
-                        }).spawn();
+                            EngineEvent::TranscriptionSegment(seg) => {
+                                let _ = ah.emit("transcription-segment", seg);
+                            }
+                            EngineEvent::RecordingStarted => {
+                                let _ = ah.emit("recording-started", ());
+                            }
+                            EngineEvent::RecordingStopped { duration_ms } => {
+                                let _ = ah.emit("recording-stopped", duration_ms);
+                            }
+                            EngineEvent::PlaybackComplete => {
+                                let _ = ah.emit("playback-complete", ());
+                            }
+                            EngineEvent::AgcGainChanged(gain_db) => {
+                                let _ = ah.emit("agc-gain-changed", gain_db);
+                            }
+                            EngineEvent::AudioData(data) => {
+                                let _ = ah.emit("audio-data", data);
+                            }
+                            EngineEvent::RawAudioData(data) => {
+                                let _ = ah.emit("raw-audio-data", data);
+                            }
+                        })
+                        .spawn();
 
                         *engine_arc.lock().await = Some(engine);
                     }

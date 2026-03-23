@@ -256,6 +256,7 @@ async function init() {
   // Wait a moment for engine to initialize, then load devices and sync backend state
   setTimeout(async () => {
     await loadDevices();
+    await applyPersistedConfigToBackend();
     await checkModelStatus();
     await checkGpuStatus();
 
@@ -264,6 +265,16 @@ async function init() {
 
     statusText.textContent = "Ready";
   }, 1000);
+}
+
+async function applyPersistedConfigToBackend() {
+  try {
+    await invoke("set_engine_config", {
+      config: demoConfigToEngineConfig(demoConfig),
+    });
+  } catch (e) {
+    console.error("Failed to apply persisted config:", e);
+  }
 }
 
 /** Sync current toggle states to the Rust backend after engine init. */
