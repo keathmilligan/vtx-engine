@@ -248,6 +248,10 @@ impl AudioBackend for WasapiBackend {
         *self.recording_mode.lock().unwrap() = mode;
     }
 
+    fn supports_render_output(&self) -> bool {
+        true
+    }
+
     fn start_render(&self) -> Result<mpsc::SyncSender<Vec<f32>>, String> {
         // Stop any previous render session.
         self.stop_render()?;

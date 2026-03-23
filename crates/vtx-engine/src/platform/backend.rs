@@ -55,6 +55,11 @@ pub trait AudioBackend: Send + Sync {
     /// `AudioEngine` capture loop regardless.
     fn set_gain(&self, _db: f32) {}
 
+    /// Whether this backend can render playback audio to the system output.
+    fn supports_render_output(&self) -> bool {
+        false
+    }
+
     /// Start audio output rendering on the system default output device.
     ///
     /// Returns a channel sender for pushing mono f32 samples at 48 kHz.

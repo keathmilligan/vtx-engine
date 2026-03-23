@@ -313,6 +313,13 @@ async fn stop_playback(state: tauri::State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
+async fn supports_render_output() -> Result<bool, String> {
+    Ok(vtx_engine::platform::get_backend()
+        .map(|backend| backend.supports_render_output())
+        .unwrap_or(cfg!(target_os = "windows")))
+}
+
+#[tauri::command]
 async fn is_recording(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let engine_lock = state.engine.lock().await;
     let engine = engine_lock.as_ref().ok_or("Engine not initialized")?;
@@ -598,6 +605,7 @@ pub fn run() {
             is_recording,
             open_file,
             stop_playback,
+            supports_render_output,
             get_engine_config,
             set_engine_config,
             set_ptt_mode,
