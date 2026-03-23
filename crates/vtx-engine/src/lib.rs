@@ -1200,7 +1200,9 @@ impl AudioEngine {
             // A plain "CUDA" substring can appear in non-GPU info strings, so
             // match the more specific form used by flowstt for consistency.
             cuda_available: system_info.contains("CUDA : ARCHS"),
-            metal_available: system_info.contains("METAL = 1"),
+            // Metal backend is indicated by "Metal :" in the system info string
+            // (e.g., "Metal : EMBED_LIBRARY = 1 | ...")
+            metal_available: system_info.contains("Metal :"),
             system_info,
         })
     }
