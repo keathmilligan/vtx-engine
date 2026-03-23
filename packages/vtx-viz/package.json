@@ -1,6 +1,6 @@
 {
   "name": "@vtx-engine/viz",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Audio visualization components for vtx-engine - waveform, spectrogram, and speech activity renderers",
   "type": "module",
   "main": "dist/index.js",
