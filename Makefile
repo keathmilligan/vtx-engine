@@ -45,6 +45,10 @@ install: node_modules
 
 ## Run the demo app in Tauri development mode
 demo-dev: install
+	@if lsof -tiTCP:1420 -sTCP:LISTEN >/dev/null; then \
+		echo "error: port 1420 is already in use. Stop the existing Vite/Tauri dev process first, then rerun 'make demo-dev'."; \
+		exit 1; \
+	fi
 	pnpm --filter vtx-demo tauri dev
 
 ## Watch and rebuild the viz package on changes

@@ -12,7 +12,7 @@ import {
   SpectrogramRenderer,
   SpeechActivityRenderer,
 } from "@vtx-engine/viz";
-import type { VisualizationPayload } from "@vtx-engine/viz";
+import type { SpeechMetrics, VisualizationPayload } from "@vtx-engine/viz";
 
 // =============================================================================
 // Types matching Rust backend
@@ -158,9 +158,16 @@ async function saveDemoConfig(config: DemoConfig): Promise<void> {
 let isRecording = false;
 let isPlayingBack = false;
 let activeDocumentPath: string | null = null;
+let activePlaybackMode: "play" | "reprocess" | null = null;
 let waveformRenderer: WaveformRenderer;
 let spectrogramRenderer: SpectrogramRenderer;
 let speechActivityRenderer: SpeechActivityRenderer;
+let playbackAudioContext: AudioContext | null = null;
+let playbackAnalyser: AnalyserNode | null = null;
+let playbackSourceNode: MediaElementAudioSourceNode | null = null;
+let playbackVizFrameId: number | null = null;
+let playbackTimeData: Float32Array | null = null;
+let playbackFreqData: Uint8Array | null = null;
 
 // Demo config loaded from backend
 let demoConfig: DemoConfig;
@@ -188,8 +195,11 @@ const btnCapture = document.getElementById("btn-capture") as HTMLButtonElement;
 const btnOpenFile = document.getElementById(
   "btn-open-file"
 ) as HTMLButtonElement;
-const btnPlay = document.getElementById(
-  "btn-play"
+const btnPlayback = document.getElementById(
+  "btn-playback"
+) as HTMLButtonElement;
+const btnReprocess = document.getElementById(
+  "btn-reprocess"
 ) as HTMLButtonElement;
 const btnDownloadModel = document.getElementById(
   "btn-download-model"
@@ -214,6 +224,34 @@ const playbackAudio = document.getElementById("playback-audio") as HTMLAudioElem
 // =============================================================================
 
 const APP_TITLE_BASE = "VTX Engine Demo";
+const PLAY_BUTTON_LABEL = "\u25B6 Play";
+const REPROCESS_BUTTON_LABEL = "\u21BB Re-Process";
+const STOP_BUTTON_LABEL = "\u25A0 Stop";
+const PLAYBACK_STATUS = "Playing...";
+const REPROCESSING_STATUS = "Re-processing...";
+
+function updatePlaybackButtons() {
+  const hasDocument = Boolean(activeDocumentPath);
+  const playActive = activePlaybackMode === "play";
+  const reprocessActive = activePlaybackMode === "reprocess";
+
+  btnPlayback.disabled = !hasDocument || isRecording || reprocessActive;
+  btnReprocess.disabled = !hasDocument || isRecording || playActive;
+
+  btnPlayback.textContent = playActive ? STOP_BUTTON_LABEL : PLAY_BUTTON_LABEL;
+  btnReprocess.textContent = reprocessActive ? STOP_BUTTON_LABEL : REPROCESS_BUTTON_LABEL;
+
+  btnPlayback.classList.toggle("playing", playActive);
+  btnReprocess.classList.toggle("playing", reprocessActive);
+}
+
+function setPlaybackMode(mode: "play" | "reprocess" | null) {
+  activePlaybackMode = mode;
+  isPlayingBack = mode !== null;
+  btnOpenFile.disabled = mode !== null;
+  btnCapture.disabled = mode !== null || !deviceSelect.value;
+  updatePlaybackButtons();
+}
 
 function setActiveDocument(path: string | null) {
   activeDocumentPath = path;
@@ -226,8 +264,7 @@ function setActiveDocument(path: string | null) {
     appTitle.textContent = APP_TITLE_BASE;
     document.title = APP_TITLE_BASE;
   }
-  // Enable Play only when a document is open and not recording
-  btnPlay.disabled = !path || isRecording;
+  updatePlaybackButtons();
 }
 
 // =============================================================================
@@ -280,6 +317,13 @@ function resolveRawPlaybackPath(filePath: string): string {
   return filePath.replace(/-processed(?=\.wav$)/i, "");
 }
 
+function resolveProcessedPlaybackPath(filePath: string): string {
+  if (/-processed\.wav$/i.test(filePath)) {
+    return filePath;
+  }
+  return filePath.replace(/\.wav$/i, "-processed.wav");
+}
+
 async function configurePlaybackSink(): Promise<void> {
   const sinkId = demoConfig.audio_output_device_id;
   if (!sinkId) return;
@@ -296,23 +340,157 @@ async function configurePlaybackSink(): Promise<void> {
   }
 }
 
-async function startBrowserPlayback(filePath: string): Promise<void> {
-  if (engineRenderOutputSupported) return;
+function stopPlaybackVisualization(): void {
+  if (playbackVizFrameId !== null) {
+    cancelAnimationFrame(playbackVizFrameId);
+    playbackVizFrameId = null;
+  }
+}
 
-  const playbackPath = resolveRawPlaybackPath(filePath);
+function buildPlaybackSpectrogramColumn(frequencyData: Uint8Array): number[] {
+  const colors: number[] = [];
+  for (let i = frequencyData.length - 1; i >= 0; i--) {
+    const intensity = frequencyData[i] / 255;
+    colors.push(
+      Math.round(intensity * 80),
+      Math.round(intensity * 180),
+      Math.round(40 + intensity * 215)
+    );
+  }
+  return colors;
+}
+
+function buildPlaybackSpeechMetrics(timeData: Float32Array, frequencyData: Uint8Array): SpeechMetrics {
+  let rmsSum = 0;
+  let zeroCrossings = 0;
+  let weightedMagnitude = 0;
+  let magnitudeSum = 0;
+
+  for (let i = 0; i < timeData.length; i++) {
+    const sample = timeData[i] ?? 0;
+    rmsSum += sample * sample;
+    if (i > 0) {
+      const prev = timeData[i - 1] ?? 0;
+      if ((sample >= 0 && prev < 0) || (sample < 0 && prev >= 0)) {
+        zeroCrossings += 1;
+      }
+    }
+  }
+
+  for (let i = 0; i < frequencyData.length; i++) {
+    const magnitude = frequencyData[i] ?? 0;
+    magnitudeSum += magnitude;
+    weightedMagnitude += i * magnitude;
+  }
+
+  const rms = Math.sqrt(rmsSum / Math.max(timeData.length, 1));
+  const amplitudeDb = rms > 0 ? 20 * Math.log10(rms) : -60;
+  const zcr = zeroCrossings / Math.max(timeData.length - 1, 1);
+  const nyquist = (playbackAudioContext?.sampleRate ?? 48000) / 2;
+  const centroidHz = magnitudeSum > 0
+    ? (weightedMagnitude / magnitudeSum / Math.max(frequencyData.length - 1, 1)) * nyquist
+    : 0;
+  const speaking = amplitudeDb > -42;
+
+  return {
+    amplitude_db: Math.max(-60, amplitudeDb),
+    zcr,
+    centroid_hz: centroidHz,
+    is_speaking: speaking,
+    voiced_onset_pending: false,
+    whisper_onset_pending: false,
+    is_transient: false,
+    is_lookback_speech: false,
+    is_word_break: false,
+  };
+}
+
+function drawPlaybackVisualization(): void {
+  if (!playbackAnalyser || !playbackTimeData || !playbackFreqData) return;
+  if (!isPlayingBack) return;
+
+  playbackAnalyser.getFloatTimeDomainData(playbackTimeData);
+  playbackAnalyser.getByteFrequencyData(playbackFreqData);
+
+  waveformRenderer.pushSamples(Array.from(playbackTimeData));
+  spectrogramRenderer.pushColumn(buildPlaybackSpectrogramColumn(playbackFreqData));
+  speechActivityRenderer.pushMetrics(
+    buildPlaybackSpeechMetrics(playbackTimeData, playbackFreqData)
+  );
+
+  playbackVizFrameId = requestAnimationFrame(drawPlaybackVisualization);
+}
+
+async function ensurePlaybackAnalyser(): Promise<void> {
+  if (!playbackAudioContext) {
+    playbackAudioContext = new AudioContext();
+  }
+  if (!playbackSourceNode) {
+    playbackSourceNode = playbackAudioContext.createMediaElementSource(playbackAudio);
+  }
+  if (!playbackAnalyser) {
+    playbackAnalyser = playbackAudioContext.createAnalyser();
+    playbackAnalyser.fftSize = 2048;
+    playbackAnalyser.smoothingTimeConstant = 0.72;
+    playbackSourceNode.connect(playbackAnalyser);
+    playbackAnalyser.connect(playbackAudioContext.destination);
+    playbackTimeData = new Float32Array(playbackAnalyser.fftSize);
+    playbackFreqData = new Uint8Array(playbackAnalyser.frequencyBinCount);
+  }
+  if (playbackAudioContext.state === "suspended") {
+    await playbackAudioContext.resume();
+  }
+}
+
+function startPlaybackVisualizers() {
+  waveformRenderer.clear();
+  spectrogramRenderer.clear();
+  speechActivityRenderer.clear();
+  waveformRenderer.start();
+  spectrogramRenderer.start();
+  speechActivityRenderer.start();
+}
+
+function stopPlaybackVisualizers() {
+  stopPlaybackVisualization();
+  waveformRenderer.stop();
+  spectrogramRenderer.stop();
+  speechActivityRenderer.stop();
+}
+
+async function startBrowserPlayback(
+  filePath: string,
+  mode: "play" | "reprocess"
+): Promise<void> {
+  if (mode === "reprocess" && engineRenderOutputSupported) return;
+
+  const playbackPath = mode === "reprocess"
+    ? resolveRawPlaybackPath(filePath)
+    : resolveProcessedPlaybackPath(filePath);
   playbackAudio.pause();
   playbackAudio.currentTime = 0;
   playbackAudio.src = convertFileSrc(playbackPath);
   await configurePlaybackSink();
+  if (mode === "play") {
+    await ensurePlaybackAnalyser();
+    spectrogramRenderer.configure(playbackAudioContext?.sampleRate ?? 48000);
+    speechActivityRenderer.configure(16);
+  }
 
   try {
     await playbackAudio.play();
+    if (mode === "play") {
+      stopPlaybackVisualization();
+      drawPlaybackVisualization();
+    }
   } catch (e) {
     console.error("Failed to start browser playback fallback:", e);
+    throw e;
   }
 }
 
 function stopBrowserPlayback(): void {
+  stopPlaybackVisualization();
   playbackAudio.pause();
   playbackAudio.currentTime = 0;
   playbackAudio.removeAttribute("src");
@@ -476,11 +654,24 @@ function setupSpeechActivityScroll(canvas: HTMLCanvasElement): void {
 function setupEventListeners() {
   btnCapture.addEventListener("click", toggleRecording);
   btnOpenFile.addEventListener("click", openWavFile);
-  btnPlay.addEventListener("click", togglePlayback);
+  btnPlayback.addEventListener("click", togglePlayback);
+  btnReprocess.addEventListener("click", toggleReprocess);
   btnDownloadModel.addEventListener("click", downloadModel);
   transcriptionToggle.addEventListener("change", onTranscriptionToggle);
   autoTranscriptionToggle.addEventListener("change", onAutoTranscriptionToggle);
   aecToggle.addEventListener("change", onAecToggle);
+  playbackAudio.addEventListener("ended", () => {
+    if (activePlaybackMode === "play") {
+      onPlaybackComplete();
+    }
+  });
+  playbackAudio.addEventListener("error", () => {
+    if (activePlaybackMode !== "play") return;
+    statusText.textContent = "Playback error: processed file not found";
+    stopBrowserPlayback();
+    stopPlaybackVisualizers();
+    setPlaybackMode(null);
+  });
 
   // Save device selections on change
   deviceSelect.addEventListener("change", async () => {
@@ -556,7 +747,9 @@ async function setupBackendListeners() {
 
   // File playback complete
   await listen("playback-complete", () => {
-    onPlaybackComplete();
+    if (activePlaybackMode === "reprocess") {
+      onReprocessComplete();
+    }
   });
 
   // Capture state changes
@@ -580,7 +773,11 @@ async function setupBackendListeners() {
 
   await listen("speech-ended", () => {
     if (isRecording || isPlayingBack) {
-      statusText.textContent = isRecording ? "Capturing..." : "Playing...";
+      statusText.textContent = isRecording
+        ? "Capturing..."
+        : activePlaybackMode === "play"
+          ? PLAYBACK_STATUS
+          : REPROCESSING_STATUS;
     }
     // In auto-transcription mode, speech-ended means the audio segment was
     // just split and submitted to the transcription queue.  Mark this moment
@@ -762,7 +959,7 @@ async function startRecording() {
     deviceSelect2.disabled = true;
     aecToggle.disabled = true;
     autoTranscriptionToggle.disabled = true;
-    btnPlay.disabled = true;
+    updatePlaybackButtons();
     statusText.textContent = "Capturing...";
 
     // Reset visualization and transcription output for the new session
@@ -810,8 +1007,7 @@ async function stopRecording() {
     if (savedPath) {
       setActiveDocument(savedPath);
     } else {
-      // Re-enable Play if a document was already open
-      btnPlay.disabled = !activeDocumentPath;
+      updatePlaybackButtons();
     }
 
     // Stop renderers
@@ -824,72 +1020,70 @@ async function stopRecording() {
 }
 
 // =============================================================================
-// File Playback (Open / Reprocess)
+// File Playback (Play / Re-Process)
 // =============================================================================
 
-/** Start playing a file through the engine pipeline and update UI state.
- *
- * The engine always reprocesses from the raw recording with the current
- * processing settings. Audible output comes from the native render endpoint
- * when the backend supports it, otherwise a hidden browser audio element plays
- * the same raw WAV as a fallback.
- */
-async function startFilePlayback(filePath: string) {
-  // Stop any previous engine pipeline playback.
+async function stopActivePlayback() {
   await invoke("stop_playback").catch(() => {});
   stopBrowserPlayback();
+  stopPlaybackVisualizers();
+  setPlaybackMode(null);
+}
+
+/** Play the existing processed WAV without re-running the engine pipeline. */
+async function startProcessedPlayback(filePath: string) {
+  await stopActivePlayback();
+
+  startPlaybackVisualizers();
+  setPlaybackMode("play");
+  statusText.textContent = PLAYBACK_STATUS;
+
+  try {
+    await startBrowserPlayback(filePath, "play");
+  } catch (e) {
+    console.error("Playback failed:", e);
+    statusText.textContent = "Playback error: processed file not found";
+    await stopActivePlayback();
+  }
+}
+
+/** Start re-processing a file through the engine pipeline and update UI state. */
+async function startFileReprocess(filePath: string) {
+  await stopActivePlayback();
 
   clearTranscriptionOutput();
-  setPlayingBack(true);
-  statusText.textContent = "Playing...";
+  startPlaybackVisualizers();
+  setPlaybackMode("reprocess");
+  statusText.textContent = REPROCESSING_STATUS;
 
   const pttMode = !autoTranscriptionEnabled;
 
   try {
     await invoke("open_file", { path: filePath, pttMode });
-    await startBrowserPlayback(filePath);
-    // Engine pipeline runs in the background; onPlaybackComplete() fires via event.
+    await startBrowserPlayback(filePath, "reprocess");
+    // Engine pipeline runs in the background; onReprocessComplete() fires via event.
   } catch (e) {
     console.error("Playback failed:", e);
     statusText.textContent = `Playback error: ${e}`;
-    setPlayingBack(false);
-    stopBrowserPlayback();
-    return;
+    await stopActivePlayback();
   }
 }
 
-function setPlayingBack(active: boolean) {
-  isPlayingBack = active;
-  btnOpenFile.disabled = active;
-  btnCapture.disabled = active || !deviceSelect.value;
-  // Play button stays enabled during playback so the user can stop it;
-  // it switches label and style to indicate the stop action.
-  btnPlay.disabled = !activeDocumentPath || isRecording;
-  btnPlay.textContent = active ? "\u25A0 Stop" : "\u25B6 Play";
-  btnPlay.classList.toggle("playing", active);
-  if (active) {
-    // Reset then start renderers so they show fresh data from this playback.
-    waveformRenderer.clear();
-    spectrogramRenderer.clear();
-    speechActivityRenderer.clear();
-    waveformRenderer.start();
-    spectrogramRenderer.start();
-    speechActivityRenderer.start();
-  }
+function finishPlaybackSession() {
+  stopBrowserPlayback();
+  stopPlaybackVisualizers();
+  setPlaybackMode(null);
+  statusText.textContent = "Ready";
 }
 
 function onPlaybackComplete() {
-  isPlayingBack = false;
-  stopBrowserPlayback();
-  waveformRenderer.stop();
-  spectrogramRenderer.stop();
-  speechActivityRenderer.stop();
-  btnPlay.textContent = "\u25B6 Play";
-  btnPlay.classList.remove("playing");
-  btnOpenFile.disabled = false;
-  btnCapture.disabled = !deviceSelect.value;
-  btnPlay.disabled = !activeDocumentPath;
-  statusText.textContent = "Ready";
+  if (activePlaybackMode !== "play") return;
+  finishPlaybackSession();
+}
+
+function onReprocessComplete() {
+  if (activePlaybackMode !== "reprocess") return;
+  finishPlaybackSession();
 }
 
 async function openWavFile() {
@@ -903,19 +1097,27 @@ async function openWavFile() {
 
     const filePath = typeof selected === "string" ? selected : selected;
     setActiveDocument(filePath);
-    await startFilePlayback(filePath);
+    await startFileReprocess(filePath);
   } catch (e) {
     console.error("File dialog error:", e);
   }
 }
 
 async function togglePlayback() {
-  if (isPlayingBack) {
-    // Stop active playback (engine handles render endpoint cleanup).
-    await invoke("stop_playback").catch(() => {});
-    onPlaybackComplete();
+  if (activePlaybackMode === "play") {
+    await stopActivePlayback();
+    statusText.textContent = "Ready";
   } else if (activeDocumentPath) {
-    await startFilePlayback(activeDocumentPath);
+    await startProcessedPlayback(activeDocumentPath);
+  }
+}
+
+async function toggleReprocess() {
+  if (activePlaybackMode === "reprocess") {
+    await stopActivePlayback();
+    statusText.textContent = "Ready";
+  } else if (activeDocumentPath) {
+    await startFileReprocess(activeDocumentPath);
   }
 }
 

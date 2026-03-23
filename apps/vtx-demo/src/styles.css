@@ -177,6 +177,7 @@ main {
 /* Action row: buttons left, toggles right */
 #controls-action-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   margin-top: 8px;
@@ -186,6 +187,7 @@ main {
 #action-buttons {
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
   gap: 6px;
   flex-shrink: 0;
 }
@@ -193,6 +195,7 @@ main {
 .toggles-group {
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
   gap: 16px;
   align-items: center;
   flex-shrink: 0;
@@ -220,9 +223,13 @@ select:focus {
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--btn-primary-bg);
   color: white;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   padding: 6px 16px;
   font-size: 13px;
@@ -237,7 +244,8 @@ button:hover:not(:disabled) {
 
 button:disabled {
   background: var(--btn-disabled-bg);
-  color: var(--text-muted);
+  color: #cbd5e1;
+  border-color: #6b7280;
   cursor: not-allowed;
 }
 
@@ -257,20 +265,50 @@ button#btn-open-file:hover:not(:disabled) {
   background: var(--btn-primary-bg-hover);
 }
 
-button#btn-play {
-  background: #8b5cf6;
+button#btn-playback {
+  background: #0f766e;
+  min-width: 88px;
 }
 
-button#btn-play:hover:not(:disabled) {
-  background: #7c3aed;
+button#btn-playback:hover:not(:disabled) {
+  background: #0d665f;
 }
 
-button#btn-play.playing {
+button#btn-playback.playing {
   background: var(--btn-recording-bg);
 }
 
-button#btn-play.playing:hover:not(:disabled) {
+button#btn-playback.playing:hover:not(:disabled) {
   background: var(--btn-recording-bg-hover);
+}
+
+button#btn-playback:disabled {
+  background: rgba(15, 118, 110, 0.2);
+  border-color: rgba(45, 212, 191, 0.3);
+  color: #ccfbf1;
+}
+
+button#btn-reprocess {
+  background: #8b5cf6;
+  min-width: 132px;
+}
+
+button#btn-reprocess:hover:not(:disabled) {
+  background: #7c3aed;
+}
+
+button#btn-reprocess.playing {
+  background: var(--btn-recording-bg);
+}
+
+button#btn-reprocess.playing:hover:not(:disabled) {
+  background: var(--btn-recording-bg-hover);
+}
+
+button#btn-reprocess:disabled {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
 }
 
 button#btn-download-model {
