@@ -116,17 +116,13 @@ impl ModelManager {
     ///
     /// The file is not required to exist for this method to succeed.
     pub fn path(&self, model: WhisperModel) -> PathBuf {
-        self.cache_dir
-            .join(format!("ggml-{}.bin", model.slug()))
+        self.cache_dir.join(format!("ggml-{}.bin", model.slug()))
     }
 
     /// Return `true` if the model file exists on disk and has a non-zero size.
     pub fn is_available(&self, model: WhisperModel) -> bool {
         let p = self.path(model);
-        p.exists()
-            && p.metadata()
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
+        p.exists() && p.metadata().map(|m| m.len() > 0).unwrap_or(false)
     }
 
     /// Return all cached (available) model variants in ascending order of model
@@ -210,10 +206,7 @@ impl ModelManager {
             .map_err(|e| ModelError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(ModelError::Network(format!(
-                "HTTP {}",
-                response.status()
-            )));
+            return Err(ModelError::Network(format!("HTTP {}", response.status())));
         }
 
         let total_size = response.content_length().unwrap_or(0);
@@ -232,8 +225,7 @@ impl ModelManager {
         use futures::StreamExt;
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result
-                .map_err(|e| ModelError::Network(e.to_string()))?;
+            let chunk = chunk_result.map_err(|e| ModelError::Network(e.to_string()))?;
 
             file.write_all(&chunk).await.map_err(ModelError::Io)?;
             downloaded += chunk.len() as u64;

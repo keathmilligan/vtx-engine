@@ -214,12 +214,24 @@ pub struct AgcConfig {
     pub gate_threshold_db: f32,
 }
 
-fn default_agc_target_level_db() -> f32 { -18.0 }
-fn default_agc_attack_time_ms() -> f32 { 10.0 }
-fn default_agc_release_time_ms() -> f32 { 200.0 }
-fn default_agc_min_gain_db() -> f32 { -6.0 }
-fn default_agc_max_gain_db() -> f32 { 30.0 }
-fn default_agc_gate_threshold_db() -> f32 { -50.0 }
+fn default_agc_target_level_db() -> f32 {
+    -18.0
+}
+fn default_agc_attack_time_ms() -> f32 {
+    10.0
+}
+fn default_agc_release_time_ms() -> f32 {
+    200.0
+}
+fn default_agc_min_gain_db() -> f32 {
+    -6.0
+}
+fn default_agc_max_gain_db() -> f32 {
+    30.0
+}
+fn default_agc_gate_threshold_db() -> f32 {
+    -50.0
+}
 
 impl Default for AgcConfig {
     fn default() -> Self {
@@ -235,17 +247,39 @@ impl Default for AgcConfig {
     }
 }
 
-fn default_vad_voiced_threshold_db() -> f32 { -42.0 }
-fn default_vad_whisper_threshold_db() -> f32 { -52.0 }
-fn default_vad_voiced_onset_ms() -> u64 { 80 }
-fn default_vad_whisper_onset_ms() -> u64 { 120 }
-fn default_segment_max_duration_ms() -> u64 { 4000 }
-fn default_segment_word_break_grace_ms() -> u64 { 750 }
-fn default_segment_lookback_ms() -> u64 { 200 }
-fn default_transcription_queue_capacity() -> usize { 8 }
-fn default_viz_frame_interval_ms() -> u64 { 16 }
-fn default_word_break_segmentation_enabled() -> bool { true }
-fn default_mic_gain_db() -> f32 { 0.0 }
+fn default_vad_voiced_threshold_db() -> f32 {
+    -42.0
+}
+fn default_vad_whisper_threshold_db() -> f32 {
+    -52.0
+}
+fn default_vad_voiced_onset_ms() -> u64 {
+    80
+}
+fn default_vad_whisper_onset_ms() -> u64 {
+    120
+}
+fn default_segment_max_duration_ms() -> u64 {
+    4000
+}
+fn default_segment_word_break_grace_ms() -> u64 {
+    750
+}
+fn default_segment_lookback_ms() -> u64 {
+    200
+}
+fn default_transcription_queue_capacity() -> usize {
+    8
+}
+fn default_viz_frame_interval_ms() -> u64 {
+    16
+}
+fn default_word_break_segmentation_enabled() -> bool {
+    true
+}
+fn default_mic_gain_db() -> f32 {
+    0.0
+}
 
 impl Default for EngineConfig {
     fn default() -> Self {
@@ -389,7 +423,9 @@ impl AudioEngine {
     ///
     /// Returns `(engine, receiver)`. Subscribe to additional receivers via
     /// [`AudioEngine::subscribe`].
-    pub async fn new(config: EngineConfig) -> Result<(Self, broadcast::Receiver<EngineEvent>), String> {
+    pub async fn new(
+        config: EngineConfig,
+    ) -> Result<(Self, broadcast::Receiver<EngineEvent>), String> {
         EngineBuilder::from_config(config).build().await
     }
 
@@ -447,7 +483,8 @@ impl AudioEngine {
             return;
         }
 
-        let duration_ms = self.recording_start
+        let duration_ms = self
+            .recording_start
             .lock()
             .unwrap()
             .take()
@@ -476,7 +513,9 @@ impl AudioEngine {
             }
         }
 
-        let _ = self.sender.send(EngineEvent::RecordingStopped { duration_ms });
+        let _ = self
+            .sender
+            .send(EngineEvent::RecordingStopped { duration_ms });
     }
 
     /// Whether a manual recording session is currently active.
@@ -577,7 +616,8 @@ impl AudioEngine {
         }
 
         // Grab the injection sender.
-        let tx = self.playback_tx
+        let tx = self
+            .playback_tx
             .lock()
             .unwrap()
             .clone()
@@ -707,8 +747,7 @@ impl AudioEngine {
     ///
     /// Returns `None` if no system devices are available.
     pub fn get_default_system_device(&self) -> Option<AudioDevice> {
-        platform::get_backend()
-            .and_then(|b| b.get_default_system_device())
+        platform::get_backend().and_then(|b| b.get_default_system_device())
     }
 
     /// Start audio capture from the specified sources.
@@ -724,8 +763,8 @@ impl AudioEngine {
             self.stop_capture().await?;
         }
 
-        let backend = platform::get_backend()
-            .ok_or_else(|| "Audio backend not initialized".to_string())?;
+        let backend =
+            platform::get_backend().ok_or_else(|| "Audio backend not initialized".to_string())?;
 
         // Resolve the effective recording mode: use the live override when set,
         // otherwise fall back to the baked-in EngineConfig value.
@@ -797,11 +836,7 @@ impl AudioEngine {
     /// This is factored out so it can be started both from `start_capture`
     /// (with a hardware backend providing audio) and from `play_file`
     /// (injection-only, no hardware backend required).
-    fn start_audio_loop(
-        &self,
-        sample_rate: u32,
-        inject_rx: std::sync::mpsc::Receiver<AudioData>,
-    ) {
+    fn start_audio_loop(&self, sample_rate: u32, inject_rx: std::sync::mpsc::Receiver<AudioData>) {
         let loop_active = self.audio_loop_active.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let sender = self.sender.clone();
@@ -852,7 +887,8 @@ impl AudioEngine {
                 if let Some(data) = audio_data {
                     // Mix down to mono.  This copy is kept unmodified as the
                     // "raw" mono snapshot used for the raw WAV accumulation buffer.
-                    let raw_mono_samples = audio::convert_to_mono(&data.samples, data.channels as usize);
+                    let raw_mono_samples =
+                        audio::convert_to_mono(&data.samples, data.channels as usize);
 
                     // --- Raw audio streaming (pre-processing) ---
                     if raw_audio_streaming_enabled {
@@ -884,7 +920,9 @@ impl AudioEngine {
                     if let Ok(new_cfg) = agc_config_shared.try_lock() {
                         agc_processor.update_config(new_cfg.clone());
                     }
-                    if let Some(agc_gain_db) = agc_processor.process(&mut processed_samples, sample_rate) {
+                    if let Some(agc_gain_db) =
+                        agc_processor.process(&mut processed_samples, sample_rate)
+                    {
                         let _ = sender.send(EngineEvent::AgcGainChanged(agc_gain_db));
                     }
 
@@ -1063,7 +1101,10 @@ impl AudioEngine {
 
     /// Get the current AGC configuration.
     pub fn agc_config(&self) -> AgcConfig {
-        self.agc_config.lock().map(|g| g.clone()).unwrap_or_default()
+        self.agc_config
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Get the current engine configuration.
@@ -1096,26 +1137,28 @@ impl AudioEngine {
     pub fn set_config(&mut self, config: EngineConfig) {
         let gain = config.mic_gain_db;
         let agc = config.agc.clone();
-        
+
         // Check if model has changed
         let model_changed = self.config.model != config.model;
-        
+
         self.config = config;
         self.set_mic_gain(gain);
         self.set_agc_config(agc);
-        
+
         // If model changed, resolve new path and restart transcription worker
         if model_changed {
-            let new_model_path = crate::model_manager::ModelManager::new(&self.app_name)
-                .path(self.config.model);
-            
+            let new_model_path =
+                crate::model_manager::ModelManager::new(&self.app_name).path(self.config.model);
+
             info!(
                 "[Engine] Model changed from {:?} to {:?}, updating path: {}",
-                self.config.model, self.config.model, new_model_path.display()
+                self.config.model,
+                self.config.model,
+                new_model_path.display()
             );
-            
+
             self.model_path = new_model_path.clone();
-            
+
             // Restart transcription worker with new model if transcription is enabled
             if let Some(ref queue) = self.transcription_queue {
                 queue.restart_worker(new_model_path);
@@ -1212,7 +1255,8 @@ impl AudioEngine {
         EngineStatus {
             capturing: self.audio_loop_active.load(Ordering::SeqCst),
             in_speech: false,
-            queue_depth: self.transcription_queue
+            queue_depth: self
+                .transcription_queue
                 .as_ref()
                 .map(|q| q.queue_depth())
                 .unwrap_or(0),
@@ -1396,8 +1440,8 @@ impl AudioEngine {
     pub fn start_test_capture(&self, device_id: String) -> Result<(), String> {
         let sender = self.sender.clone();
 
-        let backend = platform::get_backend()
-            .ok_or_else(|| "Audio backend not initialized".to_string())?;
+        let backend =
+            platform::get_backend().ok_or_else(|| "Audio backend not initialized".to_string())?;
 
         let sample_rate = backend.sample_rate();
 
@@ -1421,7 +1465,11 @@ impl AudioEngine {
                     if sample_buffer.len() >= samples_per_report {
                         let sum_sq: f32 = sample_buffer.iter().map(|s| s * s).sum();
                         let rms = (sum_sq / sample_buffer.len() as f32).sqrt();
-                        let db = if rms > 0.0 { 20.0 * rms.log10() } else { -100.0 };
+                        let db = if rms > 0.0 {
+                            20.0 * rms.log10()
+                        } else {
+                            -100.0
+                        };
 
                         let _ = sender.send(EngineEvent::AudioLevelUpdate {
                             device_id: device_id.clone(),
@@ -1488,16 +1536,16 @@ impl transcription::TranscriptionCallback for EngineTranscriptionCallback {
 
         info!("[Transcription] Complete: {}", trimmed);
 
-        let _ = self.sender.send(EngineEvent::TranscriptionComplete(
-            TranscriptionResult {
+        let _ = self
+            .sender
+            .send(EngineEvent::TranscriptionComplete(TranscriptionResult {
                 id: None,
                 text: trimmed.to_string(),
                 timestamp: None,
                 duration_ms: None,
                 audio_path: wav_path,
                 timestamp_offset_ms: None,
-            },
-        ));
+            }));
     }
 
     fn on_transcription_error(&self, error: String) {
@@ -1524,7 +1572,11 @@ mod tests {
     fn gain_zero_db_is_unity() {
         let gain_db: f32 = 0.0;
         let linear = 10f32.powf(gain_db / 20.0);
-        assert!((linear - 1.0f32).abs() < 1e-6, "0 dB should give linear=1.0, got {}", linear);
+        assert!(
+            (linear - 1.0f32).abs() < 1e-6,
+            "0 dB should give linear=1.0, got {}",
+            linear
+        );
 
         let sample: f32 = 0.5;
         let result = (sample * linear).clamp(-1.0, 1.0);
@@ -1538,7 +1590,10 @@ mod tests {
         let linear = 10f32.powf(gain_db / 20.0);
 
         let samples: Vec<f32> = vec![0.1, -0.1, 0.9, -0.9, 1.0, -1.0];
-        let clamped: Vec<f32> = samples.iter().map(|s| (*s * linear).clamp(-1.0, 1.0)).collect();
+        let clamped: Vec<f32> = samples
+            .iter()
+            .map(|s| (*s * linear).clamp(-1.0, 1.0))
+            .collect();
 
         for s in &clamped {
             assert!(*s >= -1.0 && *s <= 1.0, "sample {} out of range", s);

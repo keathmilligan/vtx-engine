@@ -1,16 +1,16 @@
 //! Fluent builder for constructing an [`AudioEngine`].
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::Arc;
 
+use crate::{RecordingMode, TranscriptionProfile, WhisperModel};
 use tokio::sync::broadcast;
 use tracing::info;
-use crate::{RecordingMode, TranscriptionProfile, WhisperModel};
 
-use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
 use crate::transcription;
 use crate::transcription::TranscribeStateCallback;
+use crate::{AudioEngine, EngineConfig, EngineTranscriptionCallback};
 
 /// Broadcast channel capacity.
 const BROADCAST_CAPACITY: usize = 256;
@@ -286,7 +286,9 @@ impl EngineBuilder {
     ///
     /// Returns `(engine, receiver)` where `receiver` is the first broadcast
     /// receiver. Call [`AudioEngine::subscribe`] to obtain additional receivers.
-    pub async fn build(self) -> Result<(AudioEngine, broadcast::Receiver<crate::EngineEvent>), String> {
+    pub async fn build(
+        self,
+    ) -> Result<(AudioEngine, broadcast::Receiver<crate::EngineEvent>), String> {
         info!("Initializing audio backend...");
         crate::platform::init_audio_backend()?;
 
@@ -304,8 +306,7 @@ impl EngineBuilder {
             explicit_path.clone()
         } else {
             // Use ModelManager to resolve path from the WhisperModel enum.
-            crate::model_manager::ModelManager::new(&self.app_name)
-                .path(self.config.model)
+            crate::model_manager::ModelManager::new(&self.app_name).path(self.config.model)
         };
 
         // Optionally initialize transcription worker
@@ -323,9 +324,9 @@ impl EngineBuilder {
         };
 
         // TranscribeState needs a queue; use a dummy no-op queue when transcription is off
-        let queue_for_state = transcription_queue.clone().unwrap_or_else(|| {
-            Arc::new(transcription::TranscriptionQueue::new())
-        });
+        let queue_for_state = transcription_queue
+            .clone()
+            .unwrap_or_else(|| Arc::new(transcription::TranscriptionQueue::new()));
 
         // Shared slot that the TranscribeStateCallback writes the WAV path into.
         let last_recording_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
@@ -439,6 +440,9 @@ mod tests {
             .with_audio_streaming()
             .with_raw_audio_streaming();
         assert_eq!(b1.audio_streaming_enabled, b2.audio_streaming_enabled);
-        assert_eq!(b1.raw_audio_streaming_enabled, b2.raw_audio_streaming_enabled);
+        assert_eq!(
+            b1.raw_audio_streaming_enabled,
+            b2.raw_audio_streaming_enabled
+        );
     }
 }

@@ -10,12 +10,12 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use crate::{EngineEvent, HistoryEntry};
 use chrono::Utc;
 use directories::ProjectDirs;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 use uuid::Uuid;
-use crate::{EngineEvent, HistoryEntry};
 
 const HISTORY_FILENAME: &str = "history.ndjson";
 
@@ -83,7 +83,11 @@ impl TranscriptionHistory {
             }
         }
 
-        Ok(Self { entries, max_entries, history_path })
+        Ok(Self {
+            entries,
+            max_entries,
+            history_path,
+        })
     }
 
     /// Append a new entry. If capacity is reached, the oldest entry is evicted.
@@ -158,8 +162,7 @@ impl TranscriptionHistory {
 
     fn append_to_file(&self, entry: &HistoryEntry) -> Result<(), HistoryError> {
         use std::io::Write;
-        let json = serde_json::to_string(entry)
-            .map_err(|e| HistoryError::Parse(e.to_string()))?;
+        let json = serde_json::to_string(entry).map_err(|e| HistoryError::Parse(e.to_string()))?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -172,8 +175,8 @@ impl TranscriptionHistory {
         use std::io::Write;
         let mut file = std::fs::File::create(&self.history_path).map_err(HistoryError::Io)?;
         for entry in &self.entries {
-            let json = serde_json::to_string(entry)
-                .map_err(|e| HistoryError::Parse(e.to_string()))?;
+            let json =
+                serde_json::to_string(entry).map_err(|e| HistoryError::Parse(e.to_string()))?;
             writeln!(file, "{}", json).map_err(HistoryError::Io)?;
         }
         Ok(())
