@@ -212,6 +212,28 @@ pub struct AgcConfig {
     /// Recommended range: -60.0 to -30.0 dBFS.
     #[serde(default = "default_agc_gate_threshold_db")]
     pub gate_threshold_db: f32,
+
+    /// Boost activation threshold in dBFS (default -40.0).
+    ///
+    /// The AGC only increases gain above unity when the smoothed power estimate
+    /// reaches this level. Signals between `gate_threshold_db` and this threshold
+    /// are treated as borderline noise and decay toward unity instead of being
+    /// boosted aggressively.
+    #[serde(default = "default_agc_boost_threshold_db")]
+    pub boost_threshold_db: f32,
+
+    /// Gate hold time in milliseconds (default 50.0).
+    ///
+    /// When transitioning from the gate region (below threshold) to above-threshold,
+    /// the AGC delays gain increase for this duration. This prevents white noise
+    /// at the beginning of speech segments from being amplified, which can cause
+    /// burst/popping sounds that interfere with transcription.
+    ///
+    /// Set to 0 to disable hold time and restore legacy behavior.
+    /// Recommended range: 0 to 200 ms. Higher values provide more protection
+    /// in noisy environments but may delay gain for quiet speech starts.
+    #[serde(default = "default_agc_gate_hold_time_ms")]
+    pub gate_hold_time_ms: f32,
 }
 
 fn default_agc_target_level_db() -> f32 {
@@ -232,6 +254,12 @@ fn default_agc_max_gain_db() -> f32 {
 fn default_agc_gate_threshold_db() -> f32 {
     -50.0
 }
+fn default_agc_boost_threshold_db() -> f32 {
+    -40.0
+}
+fn default_agc_gate_hold_time_ms() -> f32 {
+    50.0
+}
 
 impl Default for AgcConfig {
     fn default() -> Self {
@@ -243,6 +271,8 @@ impl Default for AgcConfig {
             min_gain_db: default_agc_min_gain_db(),
             max_gain_db: default_agc_max_gain_db(),
             gate_threshold_db: default_agc_gate_threshold_db(),
+            boost_threshold_db: default_agc_boost_threshold_db(),
+            gate_hold_time_ms: default_agc_gate_hold_time_ms(),
         }
     }
 }

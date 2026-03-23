@@ -125,6 +125,8 @@ mod tests {
             min_gain_db: -3.0,
             max_gain_db: 24.0,
             gate_threshold_db: -45.0,
+            boost_threshold_db: -38.0,
+            gate_hold_time_ms: 75.0,
         };
         let toml_str = toml::to_string_pretty(&config).expect("should serialize");
         let loaded: EngineConfig = toml::from_str(&toml_str).expect("should deserialize");

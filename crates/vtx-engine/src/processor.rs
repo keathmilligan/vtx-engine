@@ -1267,6 +1267,11 @@ const AGC_EVENT_INTERVAL_CHUNKS: u32 = 10;
 /// brief inter-word pauses but fast enough to settle within 1-2 seconds.
 const AGC_GATE_DECAY_TIME_MS: f32 = 500.0;
 
+/// Maximum upward gain change allowed per chunk once AGC boosting is active.
+/// This smooths the transition out of the gate/borderline-noise region so the
+/// processed signal does not jump abruptly into amplified noise or speech.
+const AGC_MAX_GAIN_RISE_DB_PER_CHUNK: f32 = 3.0;
+
 /// Automatic Gain Control processor.
 ///
 /// Implements a feed-back RMS envelope follower with asymmetric attack/release
@@ -1297,8 +1302,29 @@ pub struct AgcProcessor {
     /// Pre-computed gate threshold in the power domain, derived from
     /// `config.gate_threshold_db` as `10^(gate_threshold_db / 10)`.
     gate_threshold_power: f32,
-    /// Chunk counter for throttling `AgcGainChanged` events.
+    /// Pre-computed boost activation threshold in the power domain.
+    boost_threshold_power: f32,
+    /// Chunk counter for throttling `AgcGainChanged` event emissions.
     chunks_since_event: u32,
+    /// Elapsed hold time in milliseconds when transitioning from gate region.
+    /// Used to delay gain increase and prevent noise burst amplification.
+    hold_timer_ms: f32,
+    /// Tracks which power region we were in during the last chunk.
+    /// Used to detect transitions between noise floor / gate region / above threshold.
+    last_power_region: PowerRegion,
+    /// Cached gate hold time from config for hot-swap safety.
+    gate_hold_time_ms: f32,
+}
+
+/// Power regions for AGC gate logic.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PowerRegion {
+    /// Below noise floor - gain is held constant.
+    BelowNoiseFloor,
+    /// Between noise floor and gate threshold - gain decays toward unity.
+    GateRegion,
+    /// Above gate threshold - normal AGC gain computation.
+    AboveThreshold,
 }
 
 impl AgcProcessor {
@@ -1308,12 +1334,18 @@ impl AgcProcessor {
     /// not produce an extreme gain jump.
     pub fn new(config: AgcConfig) -> Self {
         let gate_threshold_power = db_to_power(config.gate_threshold_db);
+        let boost_threshold_power = db_to_power(config.boost_threshold_db);
+        let gate_hold_time_ms = config.gate_hold_time_ms;
         Self {
             power_estimate: 1e-6,
             current_gain_linear: 1.0,
             config,
             gate_threshold_power,
+            boost_threshold_power,
             chunks_since_event: 0,
+            hold_timer_ms: gate_hold_time_ms,
+            last_power_region: PowerRegion::BelowNoiseFloor,
+            gate_hold_time_ms,
         }
     }
 
@@ -1324,6 +1356,8 @@ impl AgcProcessor {
     /// ensuring this, typically via `try_lock` on the capture thread).
     pub fn update_config(&mut self, config: AgcConfig) {
         self.gate_threshold_power = db_to_power(config.gate_threshold_db);
+        self.boost_threshold_power = db_to_power(config.boost_threshold_db);
+        self.gate_hold_time_ms = config.gate_hold_time_ms;
         self.config = config;
     }
 
@@ -1365,33 +1399,81 @@ impl AgcProcessor {
         // 3. Update envelope estimate.
         self.power_estimate = alpha * self.power_estimate + (1.0 - alpha) * chunk_power;
 
-        // 4. Determine gain based on power region.
-        if self.power_estimate > self.gate_threshold_power {
-            // Above gate threshold → normal AGC gain computation.
+        // 4. Determine current power region.
+        let current_region = if self.power_estimate > self.gate_threshold_power {
+            PowerRegion::AboveThreshold
+        } else if self.power_estimate > AGC_NOISE_FLOOR_POWER {
+            PowerRegion::GateRegion
+        } else {
+            PowerRegion::BelowNoiseFloor
+        };
+        let boost_ready = self.power_estimate >= self.boost_threshold_power;
+
+        // 5. Handle hold time logic for gain increases.
+        // The countdown only runs once the signal is strong enough to justify
+        // gain increase above unity.
+        let chunk_duration_ms = chunk_duration_s * 1000.0;
+
+        if boost_ready {
+            if self.hold_timer_ms > 0.0 {
+                self.hold_timer_ms -= chunk_duration_ms;
+                if self.hold_timer_ms < 0.0 {
+                    self.hold_timer_ms = 0.0;
+                }
+            }
+        } else {
+            self.hold_timer_ms = self.gate_hold_time_ms;
+        }
+
+        // 6. Determine gain based on power region, boost threshold, and hold time.
+        let hold_active = boost_ready && self.hold_timer_ms > 0.0;
+
+        if hold_active {
+            // During hold time, prevent gain from rising into the segment onset.
             let target_rms = db_to_linear(self.config.target_level_db);
             let current_rms = self.power_estimate.sqrt();
             let raw_gain = target_rms / current_rms;
 
             let min_gain = db_to_linear(self.config.min_gain_db);
             let max_gain = db_to_linear(self.config.max_gain_db);
-            self.current_gain_linear = raw_gain.clamp(min_gain, max_gain);
-        } else if self.power_estimate > AGC_NOISE_FLOOR_POWER {
-            // Between noise floor and gate threshold → decay gain toward unity.
-            // This prevents amplifying background noise during speech pauses.
+            let computed_gain = raw_gain.clamp(min_gain, max_gain);
+            self.current_gain_linear = self.current_gain_linear.min(computed_gain);
+        } else if boost_ready {
+            // Strong signal and hold expired -> normal AGC gain computation.
+            let target_rms = db_to_linear(self.config.target_level_db);
+            let current_rms = self.power_estimate.sqrt();
+            let raw_gain = target_rms / current_rms;
+
+            let min_gain = db_to_linear(self.config.min_gain_db);
+            let max_gain = db_to_linear(self.config.max_gain_db);
+            let target_gain = raw_gain.clamp(min_gain, max_gain);
+            let max_rise_linear = db_to_linear(AGC_MAX_GAIN_RISE_DB_PER_CHUNK);
+            let allowed_gain = self.current_gain_linear * max_rise_linear;
+            self.current_gain_linear = if target_gain > self.current_gain_linear {
+                target_gain.min(allowed_gain)
+            } else {
+                target_gain
+            };
+        } else if current_region != PowerRegion::BelowNoiseFloor {
+            // Borderline noise between the gate threshold and boost threshold
+            // decays toward unity instead of being amplified.
             let tau = AGC_GATE_DECAY_TIME_MS / 1000.0;
             let decay_alpha = (-chunk_duration_s / tau).exp();
             self.current_gain_linear =
                 decay_alpha * self.current_gain_linear + (1.0 - decay_alpha) * 1.0;
         }
-        // At or below noise floor → hold the current gain (don't amplify silence).
+        // Below noise floor → hold the current gain (don't amplify silence).
 
-        // 5. Apply gain in-place.
+        // Update last power region for next chunk
+        self.last_power_region = current_region;
+
+        // 7. Apply gain in-place.
         let g = self.current_gain_linear;
         for s in samples.iter_mut() {
             *s = (*s * g).clamp(-1.0, 1.0);
         }
 
-        // 6. Throttle event emission.
+        // 8. Throttle event emission.
         self.chunks_since_event += 1;
         if self.chunks_since_event >= AGC_EVENT_INTERVAL_CHUNKS {
             self.chunks_since_event = 0;
@@ -1460,6 +1542,8 @@ mod agc_tests {
             min_gain_db: -6.0,
             max_gain_db: 30.0,
             gate_threshold_db: -50.0,
+            boost_threshold_db: -40.0,
+            gate_hold_time_ms: 50.0,
         }
     }
 
@@ -1672,11 +1756,11 @@ mod agc_tests {
         let sample_rate = 16000_u32;
         let chunk_size = 160;
 
-        // Quiet speech at -40 dBFS is still well above gate_threshold_db = -50.
+        // Quiet speech above the boost threshold still receives normal AGC processing.
         let cfg = default_config();
         let mut proc = AgcProcessor::new(cfg);
 
-        let quiet_speech_rms = db_to_linear(-40.0);
+        let quiet_speech_rms = db_to_linear(-35.0);
         for _ in 0..100 {
             let mut chunk = sine_wave(quiet_speech_rms, chunk_size, sample_rate);
             proc.process(&mut chunk, sample_rate);
@@ -1686,7 +1770,31 @@ mod agc_tests {
         let gain_db = proc.current_gain_db();
         assert!(
             gain_db > 10.0,
-            "Expected AGC to boost quiet speech above gate threshold (>10 dB), got {:.2} dB",
+            "Expected AGC to boost quiet speech above boost threshold (>10 dB), got {:.2} dB",
+            gain_db
+        );
+    }
+
+    /// Borderline noise above the gate threshold but below the boost threshold
+    /// should not be driven to maximum gain.
+    #[test]
+    fn agc_does_not_boost_borderline_noise() {
+        let sample_rate = 16000_u32;
+        let chunk_size = 160;
+
+        let cfg = default_config();
+        let mut proc = AgcProcessor::new(cfg);
+
+        let borderline_noise_rms = db_to_linear(-45.0);
+        for _ in 0..200 {
+            let mut chunk = sine_wave(borderline_noise_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+
+        let gain_db = proc.current_gain_db();
+        assert!(
+            gain_db < 6.0,
+            "Expected borderline noise to stay near unity, got {:.2} dB",
             gain_db
         );
     }
@@ -1743,6 +1851,7 @@ mod agc_tests {
         // Set gate threshold extremely low so it never triggers.
         let cfg = AgcConfig {
             gate_threshold_db: -100.0,
+            boost_threshold_db: -100.0,
             ..default_config()
         };
         let mut proc = AgcProcessor::new(cfg);
@@ -1761,6 +1870,104 @@ mod agc_tests {
             gain_db > 20.0,
             "Expected AGC to boost noise when gate is disabled (>20 dB), got {:.2} dB",
             gain_db
+        );
+    }
+
+    /// Gate hold time prevents noise burst at segment start.
+    #[test]
+    fn agc_gate_hold_time_prevents_noise_burst() {
+        let sample_rate = 16000_u32;
+        let chunk_size = 160; // 10 ms chunks
+
+        // Configure with 100ms hold time
+        let cfg = AgcConfig {
+            gate_hold_time_ms: 100.0,
+            ..default_config()
+        };
+        let mut proc = AgcProcessor::new(cfg);
+
+        // Phase 1: Noise in gate region (-55 dB) for 500ms → gain decays to unity
+        let noise_rms = db_to_linear(-55.0);
+        for _ in 0..50 {
+            let mut chunk = sine_wave(noise_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+        // Gain should be near unity after decay
+        let gain_after_decay = proc.current_gain_db();
+        assert!(
+            gain_after_decay.abs() < 2.0,
+            "Expected gain near unity after noise decay, got {:.2} dB",
+            gain_after_decay
+        );
+
+        // Phase 2: Transition to speech level (-30 dB, above threshold but with hold time)
+        // During hold time, gain should stay at unity (preventing noise burst)
+        let speech_rms = db_to_linear(-30.0);
+        for _ in 0..5 {
+            // 50ms = 5 chunks of 10ms each, but hold time is 100ms
+            let mut chunk = sine_wave(speech_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+        // After 50ms (half of hold time), gain should still be near unity
+        let gain_during_hold = proc.current_gain_db();
+        assert!(
+            gain_during_hold.abs() < 3.0,
+            "Expected gain near unity during hold time, got {:.2} dB",
+            gain_during_hold
+        );
+
+        // Phase 3: Continue speech through hold time (another 100ms)
+        for _ in 0..10 {
+            let mut chunk = sine_wave(speech_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+        // After hold time expires, gain should rise to appropriate level
+        let gain_after_hold = proc.current_gain_db();
+        assert!(
+            gain_after_hold > 5.0,
+            "Expected gain to increase after hold time expires, got {:.2} dB",
+            gain_after_hold
+        );
+    }
+
+    /// Zero hold time restores legacy behavior (immediate gain application).
+    #[test]
+    fn agc_zero_hold_time_legacy_behavior() {
+        let sample_rate = 16000_u32;
+        let chunk_size = 160;
+
+        // Configure with 0 hold time (legacy behavior)
+        let cfg = AgcConfig {
+            gate_hold_time_ms: 0.0,
+            ..default_config()
+        };
+        let mut proc = AgcProcessor::new(cfg);
+
+        // Phase 1: Noise in gate region for decay
+        let noise_rms = db_to_linear(-55.0);
+        for _ in 0..50 {
+            let mut chunk = sine_wave(noise_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+        let gain_after_decay = proc.current_gain_db();
+        assert!(
+            gain_after_decay.abs() < 2.0,
+            "Expected gain near unity after noise decay, got {:.2} dB",
+            gain_after_decay
+        );
+
+        // Phase 2: Immediate transition to speech - gain should apply right away
+        let speech_rms = db_to_linear(-30.0);
+        for _ in 0..5 {
+            let mut chunk = sine_wave(speech_rms, chunk_size, sample_rate);
+            proc.process(&mut chunk, sample_rate);
+        }
+        // With 0 hold time, gain should increase immediately (not stay at unity)
+        let gain_immediate = proc.current_gain_db();
+        assert!(
+            gain_immediate > 5.0,
+            "Expected immediate gain increase with 0 hold time, got {:.2} dB",
+            gain_immediate
         );
     }
 }
