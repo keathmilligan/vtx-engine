@@ -2,7 +2,7 @@
 //! This module uses libloading to dynamically load the whisper shared library at runtime.
 //!
 //! On Windows: whisper.dll is downloaded from GitHub releases
-//! On macOS: libwhisper.dylib is downloaded from GitHub releases  
+//! On macOS: libwhisper.dylib is downloaded from GitHub releases
 //! On Linux: libwhisper.so is built from source using CMake
 
 #[cfg(windows)]
@@ -10,6 +10,7 @@ use libloading::os::windows::Library as WinLibrary;
 use libloading::Library;
 use std::ffi::{c_char, c_float, c_int, CStr, CString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Opaque pointer to whisper_context
@@ -409,6 +410,12 @@ pub struct WhisperLibrary {
     full_get_segment_text:
         unsafe extern "C" fn(ctx: WhisperContext, i_segment: c_int) -> *const c_char,
     print_system_info: unsafe extern "C" fn() -> *const c_char,
+    log_set: Option<
+        unsafe extern "C" fn(
+            Option<unsafe extern "C" fn(c_int, *const c_char, *mut std::ffi::c_void)>,
+            *mut std::ffi::c_void,
+        ),
+    >,
 }
 
 // SAFETY: The library handle and function pointers don't contain thread-local data
@@ -475,6 +482,15 @@ impl WhisperLibrary {
                 .get::<unsafe extern "C" fn() -> *const c_char>(b"whisper_print_system_info\0")
                 .map_err(|e| format!("Failed to load whisper_print_system_info: {}", e))?;
 
+            // whisper_log_set is optional (available in whisper.cpp v1.5.0+)
+            let log_set = lib
+                .get::<unsafe extern "C" fn(
+                    Option<unsafe extern "C" fn(c_int, *const c_char, *mut std::ffi::c_void)>,
+                    *mut std::ffi::c_void,
+                )>(b"whisper_log_set\0")
+                .ok()
+                .map(|f| *f);
+
             Ok(Self {
                 _lib: lib,
                 init_from_file,
@@ -484,6 +500,7 @@ impl WhisperLibrary {
                 full_n_segments,
                 full_get_segment_text,
                 print_system_info,
+                log_set,
             })
         }
     }
@@ -859,4 +876,46 @@ pub fn get_system_info() -> Result<String, String> {
         .to_str()
         .map(|s| s.to_string())
         .map_err(|e| format!("Invalid UTF-8 in system info: {}", e))
+}
+
+/// Global flag: when `false` (default), whisper.cpp logs are suppressed.
+/// Set to `true` to restore the default stderr output.
+pub static WHISPER_LOGS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// A no-op log callback that swallows all whisper.cpp log messages.
+unsafe extern "C" fn silent_log_callback(
+    _level: c_int,
+    _text: *const c_char,
+    _user_data: *mut std::ffi::c_void,
+) {
+    // Do nothing — suppress all whisper.cpp output
+}
+
+/// Suppress all whisper.cpp log output (CUDA init, model load, etc.).
+/// Call before model loading to silence the C library's fprintf to stderr.
+pub fn suppress_logs() {
+    if WHISPER_LOGS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(lib) = get_lib() {
+        if let Some(log_set) = lib.log_set {
+            unsafe {
+                log_set(
+                    Some(silent_log_callback as unsafe extern "C" fn(_, _, _)),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+    }
+}
+
+/// Restore default whisper.cpp log output (goes back to stderr).
+pub fn restore_logs() {
+    if let Ok(lib) = get_lib() {
+        if let Some(log_set) = lib.log_set {
+            unsafe {
+                log_set(None, std::ptr::null_mut());
+            }
+        }
+    }
 }

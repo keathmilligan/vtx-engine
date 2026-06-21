@@ -13,8 +13,17 @@ use std::path::PathBuf;
 
 use super::whisper_ffi::{self, Context, WhisperSamplingStrategy};
 
-const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+fn model_url_from_path(model_path: &PathBuf) -> String {
+    let filename = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| "ggml-base.en.bin".into())
+        .to_string();
+    format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        filename
+    )
+}
 
 /// Minimum number of repetitions to consider text as a hallucination loop
 const MIN_REPETITIONS_FOR_LOOP: usize = 3;
@@ -26,6 +35,7 @@ const MIN_PHRASE_LENGTH: usize = 10;
 pub struct Transcriber {
     ctx: Option<Context>,
     model_path: PathBuf,
+    language: Option<String>,
     library_initialized: bool,
 }
 
@@ -36,6 +46,7 @@ impl Transcriber {
         Self {
             ctx: None,
             model_path,
+            language: None,
             library_initialized: false,
         }
     }
@@ -45,8 +56,15 @@ impl Transcriber {
         Self {
             ctx: None,
             model_path,
+            language: None,
             library_initialized: false,
         }
+    }
+
+    /// Set the expected language (e.g. "en", "zh", "ja").
+    /// When set, language detection is skipped and the specified language is used.
+    pub fn set_language(&mut self, language: Option<String>) {
+        self.language = language;
     }
 
     /// Get the path to the model file.
@@ -75,6 +93,9 @@ impl Transcriber {
         }
 
         self.ensure_library()?;
+
+        // Library is loaded — now we can find whisper_log_set and suppress logs.
+        whisper_ffi::suppress_logs();
 
         if !self.model_path.exists() {
             return Err(format!(
@@ -109,6 +130,16 @@ impl Transcriber {
 
         // Apply hallucination mitigation settings
         params.configure_with_hallucination_mitigation();
+
+        // Set language if specified — keep the CString alive alongside params
+        let _c_lang = self
+            .language
+            .as_ref()
+            .and_then(|lang| std::ffi::CString::new(lang.as_str()).ok());
+        if let Some(ref c_lang) = _c_lang {
+            params.language = c_lang.as_ptr();
+            params.detect_language = false;
+        }
 
         // Run transcription
         ctx.full(&params, audio_data)?;
@@ -320,9 +351,12 @@ where
 
     tracing::info!("Downloading whisper model to: {}", model_path.display());
 
+    let url = model_url_from_path(model_path);
+    tracing::info!("Downloading from: {}", url);
+
     let client = reqwest::Client::new();
     let response = client
-        .get(MODEL_URL)
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("Failed to download model: {}", e))?;

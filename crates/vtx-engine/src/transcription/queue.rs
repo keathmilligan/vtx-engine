@@ -116,6 +116,11 @@ impl TranscriptionQueue {
 
     /// Start the transcription worker thread.
     pub fn start_worker(&self, model_path: PathBuf) {
+        self.start_worker_with_language(model_path, None);
+    }
+
+    /// Start the transcription worker thread with an optional language hint.
+    pub fn start_worker_with_language(&self, model_path: PathBuf, language: Option<String>) {
         if self.worker_active.load(Ordering::SeqCst) {
             return; // Already running
         }
@@ -131,6 +136,9 @@ impl TranscriptionQueue {
 
         thread::spawn(move || {
             let mut transcriber = Transcriber::with_model_path(model_path.clone());
+            if let Some(ref lang) = language {
+                transcriber.set_language(Some(lang.clone()));
+            }
 
             // Try to load model at start
             if model_path.exists() {
